@@ -7,8 +7,10 @@
 - Skills in `.claude/skills/`:
   - `exeter-vpn-setup`: first-time install → login → connect, step by step with the user.
   - `exeter-vpn-troubleshoot`: diagnose a VPN that won't sign in, won't connect, or connects but doesn't work.
-- Interactive steps (password prompts, phone approval) must be run by the user. Suggest
-  `! exeter-vpn login` / `! exeter-vpn connect` so the output lands in the conversation.
+- Interactive steps (password prompts, phone approval, sudo) must be run by the user **in their own
+  terminal**, with the output pasted back. The `!` prefix has no TTY, so `sudo` fails with "a terminal is
+  required" (seen with `! exeter-vpn install`). `install`, `login`, `connect`, `mtu N` and `dns` all prompt
+  for something.
 - `.claude/settings.json` pre-allows the read-only commands (`exeter-vpn status|doctor|logs`, `ip`,
   `resolvectl status`). Anything that changes the network still prompts, which is intended.
 - When connected, the VPN is a full tunnel through a lossy gateway path, so your own web and API requests may

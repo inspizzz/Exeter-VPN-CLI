@@ -25,8 +25,13 @@ tail -n 200 ~/.via/app-via.log  # GUI/CLI side: web login + profile download
    (`pgrep -a via-ui`). Ask before closing it.
 4. **Connected, then dropped seconds later** → `grep -a 'force disconnecting' /usr/share/via/logs/app-vpn.log`.
    If present, the GUI started (often via autostart) and killed the tunnel. One client only.
-5. **Connected but pages/SSH hang** → `exeter-vpn mtu probe`, then `exeter-vpn mtu <N>` (ask first). Also
-   check DNS: `getent hosts www.exeter.ac.uk`, and if that fails, `exeter-vpn dns` (ask first).
+5. **Connected but pages/SSH hang** → `exeter-vpn mtu probe`, then `exeter-vpn mtu <N>` (ask first; it is
+   remembered per network). The right value depends on the network, so don't copy someone else's number.
+   Also check DNS: if `status` shows "DNS none set" or `getent hosts www.exeter.ac.uk` fails, offer
+   `exeter-vpn dns` (ask first).
+5b. **`status` said connected but nothing on campus answers** → check `ip -4 addr show via_vpn` has an
+   address. The link lingers DOWN after a failed connect. `connect` failing with "User name required" means
+   VIA has no saved sign-in. Current `connect` asks for the University password in that case.
 6. **Gateway unreachable or requests hang** → lossy path, so retry. Persistent? Check they're not on eduroam
    or campus (`exeter-vpn doctor`).
 7. **No push notification** (credentials confirmed correct) → the user opens Authenticator first and checks

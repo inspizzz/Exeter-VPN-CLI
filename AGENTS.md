@@ -33,7 +33,12 @@ private/                    git-ignored; the maintainer's personal notes - never
 6. Username: the full `ab123@exeter.ac.uk` worked. Exeter's docs say the bare username. Don't claim either is required.
 7. The service log `/usr/share/via/logs/app-vpn.log` contains binary bytes, so always use `grep -a`.
    `Cann't possible to send crypted frame -8807` spam is harmless if traffic flows.
-8. VIA picks MTU 1250 itself. Only lower it when large transfers stall (`exeter-vpn mtu probe`).
+8. The tunnel MTU comes from `<via_mtu>` in the gateway's profile (1250). The safe value depends on the
+   user's network (one home network passed only 1246), so `connect` measures it, lowers it if needed and
+   remembers it per network in `~/.config/exeter-vpn/mtu`. Don't recommend a fixed number from someone
+   else's network (e.g. 1400, which would be *higher* than the gateway's 1250).
+9. VIA may not register the pushed campus DNS servers with systemd-resolved (`status` shows "DNS none
+   set"). Public names still resolve via the home router, but campus-only names don't. `exeter-vpn dns` fixes it.
 
 ## Safety rules
 
@@ -47,7 +52,8 @@ private/                    git-ignored; the maintainer's personal notes - never
 - Read-only commands are always fine: `exeter-vpn status|doctor|logs|mtu|config`, `ip`, `resolvectl status`,
   reading logs.
 - Never type the user's University password into a web form or terminal for them. Have them run the
-  interactive command themselves (in Claude Code: `! exeter-vpn login`).
+  interactive command themselves in their own terminal and paste the output back (sudo can't prompt
+  without a TTY, so Claude Code's `!` prefix doesn't work for these).
 - Repeated failed MFA attempts can lock the account's MFA temporarily. Stop after 2–3 failures and
   re-check credentials.
 - Don't vendor or upload the VIA installer/RPM. It's proprietary; link to exeter.ac.uk instead.
