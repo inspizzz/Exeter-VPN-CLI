@@ -1,6 +1,6 @@
 ---
 name: exeter-vpn-setup
-description: Set up the University of Exeter VPN (Aruba VIA, remote.exeter.ac.uk) on Fedora from scratch - install the client, import the CA, sign in with MFA, download the profile and connect. Use when the user asks to install, set up or get started with the Exeter VPN.
+description: Set up the University of Exeter VPN (Aruba VIA, remote.exeter.ac.uk) on Fedora or Ubuntu/Debian from scratch - install the client, import the CA, sign in with MFA, download the profile and connect. Use when the user asks to install, set up or get started with the Exeter VPN.
 ---
 
 # Exeter VPN first-time setup
@@ -10,7 +10,8 @@ prompts for a password, needs sudo or needs their phone, **in their own terminal
 back. The `!` prefix has no TTY, so sudo prompts fail there.
 
 ## 0. Preconditions (check, don't assume)
-- Fedora/RHEL with `dnf`: `command -v dnf`. For Debian/Ubuntu, point to the README section.
+- Fedora/RHEL with `dnf`, or Ubuntu/Debian with `apt-get`: `command -v dnf apt-get`. Ubuntu/Debian is only
+  tested up to the install step, so say so, and see the README's Ubuntu / Debian section for the differences.
 - **Off campus, not on eduroam**: `nmcli -t -f active,ssid dev wifi | grep '^yes'`.
 - The user has Microsoft Authenticator (push) or a phone number as the default MFA method
   (<https://mysignins.microsoft.com/security-info>, which they check and change themselves).
@@ -19,8 +20,9 @@ back. The `!` prefix has no TTY, so sudo prompts fail there.
 `./install.sh` (safe: copies into `~/.local/bin`). Confirm `exeter-vpn --version`.
 
 ## 2. Install the VIA client (needs sudo, so ask first)
-User runs `exeter-vpn install` in their terminal. It downloads the official installer from exeter.ac.uk, extracts the RPM,
-`dnf install`s it, enables `via-vpn.service`, offers to disable the GUI autostart, and imports `rootca.pem`.
+User runs `exeter-vpn install` in their terminal. It downloads the official installer from exeter.ac.uk, extracts the RPM and
+`dnf install`s it (Fedora), or `apt-get install`s the `.deb` (Ubuntu/Debian, which restarts NetworkManager, so
+warn them first), enables `via-vpn.service`, offers to disable the GUI autostart, and imports `rootca.pem`.
 Tell them **before** they run it: the keystore password they type now is *new and of their choosing*
 (not the University password), and they must remember it.
 

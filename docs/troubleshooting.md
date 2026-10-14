@@ -44,7 +44,9 @@ Start with `exeter-vpn doctor`. It checks the most common problems.
   doesn't always register them with systemd-resolved, so lookups keep going to your home router. Public
   names still work, but campus-only ones don't. `exeter-vpn dns` sets those servers on `via_vpn` and then
   runs `resolvectl domain via_vpn ex.ac.uk '~.'`, Exeter's documented workaround, to send all lookups to
-  them. It lasts until the next reconnect.
+  them. It lasts until the next reconnect. Without systemd-resolved (common on plain Debian), `status` shows
+  the `/etc/resolv.conf` servers instead, and `exeter-vpn dns` prints the campus servers to add rather than
+  editing that file.
 
 **`connect` says "User name required" / `VIA_ERROR_NORESOURCE`**
 : VIA has no saved sign-in, which is normal on a fresh install. Current `exeter-vpn connect` handles this by

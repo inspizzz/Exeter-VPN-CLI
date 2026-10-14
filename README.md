@@ -1,10 +1,12 @@
-# Exeter VPN on Fedora
+# Exeter VPN on Fedora (and Ubuntu / Debian)
 
-Connect to the **University of Exeter VPN** (`remote.exeter.ac.uk`, Aruba VIA) from **Fedora Linux**,
-with a small command-line tool, `exeter-vpn`, that wraps the steps that are fiddly on Linux.
+Connect to the **University of Exeter VPN** (`remote.exeter.ac.uk`, Aruba VIA) from **Fedora Linux**
+(and Ubuntu / Debian), with a small command-line tool, `exeter-vpn`, that wraps the steps that are fiddly on Linux.
 
 > Unofficial and not affiliated with the University. For account or MFA problems, contact
 > Exeter IT (sid@exeter.ac.uk). Tested on Fedora 43 (KDE Plasma 6) with VIA 4.7.6, October 2026.
+> Ubuntu / Debian: the install step was tested in Ubuntu 24.04 and Debian 13 containers; the tunnel itself
+> hasn't been tested there yet (see [Ubuntu / Debian](#ubuntu--debian)).
 
 ```text
 $ exeter-vpn status
@@ -163,9 +165,34 @@ More detail: [docs/troubleshooting.md](docs/troubleshooting.md) and [docs/how-it
 
 ## Ubuntu / Debian
 
-Exeter also publishes a `.deb` (`via_4.7.6.2601123-deb_amd64.deb`). Everything after the install step is
-identical, and `exeter-vpn` works once `via-cli` is on your PATH (`exeter-vpn install` itself is dnf-only).
-Exeter notes a DNS issue on Ubuntu 20.04, which `exeter-vpn dns` fixes.
+`exeter-vpn install` detects `apt-get` and installs Exeter's `.deb` (`via_4.7.6.2601123-deb_amd64.deb`)
+instead of the RPM. Everything else works the same way. Things that differ from Fedora:
+
+- **Status:** installing was tested in Ubuntu 24.04 and Debian 13 containers. Login, connect, MTU and DNS
+  haven't been tested on a real Ubuntu/Debian machine yet. Reports are welcome.
+- Installing **restarts NetworkManager** (the package's own post-install script does this), so your
+  connection drops for a few seconds.
+- The package's post-install script needs `lsb_release`. `exeter-vpn install` installs `lsb-release` first
+  if it's missing (minimal Debian), otherwise the package is left half-configured.
+- `via-vpn` is a SysV init script on Debian/Ubuntu rather than a systemd unit. `systemctl` handles it the same way.
+- **DNS:** `exeter-vpn dns` needs systemd-resolved, which Ubuntu has by default and plain Debian often doesn't.
+  Without it, DNS comes from `/etc/resolv.conf`, which `exeter-vpn` won't edit (NetworkManager or resolvconf
+  own it). `exeter-vpn dns` then prints the campus servers to add, or you can `sudo apt install systemd-resolved`.
+  Exeter notes a DNS issue on Ubuntu 20.04, which `exeter-vpn dns` fixes.
+- To keep the keystore password in your keyring, `secret-tool` comes from `libsecret-tools`
+  (`sudo apt install libsecret-tools`).
+
+Manual equivalent of the install step:
+
+```bash
+base=https://www.exeter.ac.uk/v8media/universityofexeter/it/documents/networks/vpn
+curl -LO $base/via_4.7.6.2601123-deb_amd64.deb
+curl -LO $base/rootca.pem
+sudo apt install lsb-release ./via_4.7.6.2601123-deb_amd64.deb
+sudo systemctl enable --now via-vpn
+```
+
+Then import the CA as in the Fedora section above.
 
 ## For AI coding agents
 

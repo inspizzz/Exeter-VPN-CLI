@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # exeter-vpn - a friendly wrapper around the Aruba VIA client for the
-# University of Exeter VPN (remote.exeter.ac.uk) on Fedora / RHEL-like Linux.
+# University of Exeter VPN (remote.exeter.ac.uk) on Fedora / RHEL and Ubuntu / Debian.
 #
 # https://github.com/inspizzz/Exeter-VPN-Fedora  - MIT licence. Not affiliated with the University.
 set -euo pipefail
@@ -10,7 +10,8 @@ GATEWAY_HOST="remote.exeter.ac.uk"
 GATEWAY="https://$GATEWAY_HOST"
 AUTH_PROFILE="UoE-VIA-Auth"
 DL_BASE="https://www.exeter.ac.uk/v8media/universityofexeter/it/documents/networks/vpn"
-VIA_INSTALLER="via-4.7.6.2601123-rpm.x86_64_bin"
+VIA_INSTALLER="via-4.7.6.2601123-rpm.x86_64_bin"     # Fedora/RHEL: self-extracting, yields an RPM
+VIA_DEB="via_4.7.6.2601123-deb_amd64.deb"             # Ubuntu/Debian
 ROOT_CA="rootca.pem"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/exeter-vpn"
@@ -115,6 +116,17 @@ keystore_hint() { # after a failure: a stale keyring entry is a likely cause
 
 # ------------------------------------------------------------------------- via
 via_installed() { command -v via-cli >/dev/null 2>&1; }
+pkg_family() { # how to install VIA here: rpm (dnf), deb (apt) or empty
+  if command -v dnf >/dev/null 2>&1; then echo rpm
+  elif command -v apt-get >/dev/null 2>&1 && command -v dpkg >/dev/null 2>&1; then echo deb; fi
+}
+via_version() { # rpm -q prints "package via is not installed" on stdout, hence the capture
+  local v
+  if v=$(rpm -q via 2>/dev/null) || v=$(dpkg-query -W -f='via-${Version}' via 2>/dev/null); then echo "$v"
+  else echo unknown; fi
+}
+# systemd-resolved is the default on Fedora and Ubuntu, but not on plain Debian (/etc/resolv.conf instead).
+has_resolved() { command -v resolvectl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; }
 need_via() { via_installed || die "the VIA client is not installed - run ${B}exeter-vpn install${N} first."; }
 gui_running() { pgrep -x via-ui >/dev/null 2>&1; }
 # The via_vpn link outlives the tunnel: left DOWN, with no address after a failed connect but with the old
@@ -158,30 +170,59 @@ has_session() { awk '$6=="VIA_SESSION" && $7!="" {f=1} END {exit !f}' "$JAR" 2>/
 page_reason() { grep -A3 'id="reason"' "$1" 2>/dev/null | sed 's/<[^>]*>//g' | tr -s ' \n' ' ' | sed 's/^ *//;s/ *$//'; }
 
 # ===================================================================== commands
+download() { # download FILE...  - from exeter.ac.uk into the cache, unless already there
+  mkdir -p "$CACHE_DIR"
+  local f
+  for f in "$@"; do
+    if [[ -s $CACHE_DIR/$f ]]; then ok "$f (cached)"; continue; fi
+    spin "downloading $f from exeter.ac.uk" curl -fsSL -o "$CACHE_DIR/$f" "$DL_BASE/$f" || die "download of $f failed."
+    ok "downloaded $f"
+  done
+}
+install_rpm() {
+  download "$VIA_INSTALLER" "$ROOT_CA"
+  chmod +x "$CACHE_DIR/$VIA_INSTALLER"
+  # The official .._bin is a self-extracting installer; its 'extract' mode yields a normal RPM.
+  (cd "$CACHE_DIR" && "./$VIA_INSTALLER" extract via.rpm >/dev/null) || die "could not extract the RPM."
+  ok "extracted via.rpm"
+  say "  Installing with dnf (you may be asked for your sudo password)…"
+  sudo dnf install -y "$CACHE_DIR/via.rpm" || die "dnf install failed."
+  ok "installed $(via_version)"
+}
+install_deb() {
+  download "$VIA_DEB" "$ROOT_CA"
+  # The package's postinst calls lsb_release under 'set -e', so it fails where lsb-release is missing
+  # (minimal Debian). It also restarts NetworkManager, which drops your connection for a few seconds.
+  local extra=()
+  command -v lsb_release >/dev/null 2>&1 || extra+=(lsb-release)
+  warn "Installing restarts NetworkManager, so your connection drops for a few seconds."
+  say "  Installing with apt (you may be asked for your sudo password)…"
+  if (( ${#extra[@]} )); then sudo apt-get install -y "${extra[@]}" || die "could not install ${extra[*]}."; fi
+  # A path (not a bare name) makes apt install the local file and pull in its dependencies.
+  sudo apt-get install -y "$CACHE_DIR/$VIA_DEB" || die "apt-get install failed."
+  ok "installed $(via_version)"
+}
+
 cmd_install() {
   step "Installing the Aruba VIA client"
   need curl; need sudo
-  command -v dnf >/dev/null || die "this installer targets Fedora/RHEL (dnf). See README for Debian/Ubuntu."
-  if via_installed; then ok "VIA already installed ($(rpm -q via 2>/dev/null || echo via-cli))"
+  local fam; fam=$(pkg_family)
+  if via_installed; then ok "VIA already installed ($(via_version))"
   else
-    mkdir -p "$CACHE_DIR"
-    for f in "$VIA_INSTALLER" "$ROOT_CA"; do
-      if [[ -s $CACHE_DIR/$f ]]; then ok "$f (cached)"; continue; fi
-      spin "downloading $f from exeter.ac.uk" curl -fsSL -o "$CACHE_DIR/$f" "$DL_BASE/$f" || die "download of $f failed."
-      ok "downloaded $f"
-    done
-    chmod +x "$CACHE_DIR/$VIA_INSTALLER"
-    # The official .._bin is a self-extracting installer; its 'extract' mode yields a normal RPM.
-    (cd "$CACHE_DIR" && "./$VIA_INSTALLER" extract via.rpm >/dev/null) || die "could not extract the RPM."
-    ok "extracted via.rpm"
-    say "  Installing with dnf (you may be asked for your sudo password)…"
-    sudo dnf install -y "$CACHE_DIR/via.rpm" || die "dnf install failed."
-    ok "installed $(rpm -q via)"
+    case $fam in
+      rpm) install_rpm ;;
+      deb) install_deb ;;
+      *) bad "no dnf or apt-get here - this installer supports Fedora/RHEL and Ubuntu/Debian."
+         hint "Install the VIA client yourself (from $DL_BASE/), then rerun: exeter-vpn install"
+         exit 1 ;;
+    esac
   fi
 
   step "Starting the VIA background service"
+  # On Debian/Ubuntu via-vpn is a SysV init script; systemd wraps it, so the same command works.
   sudo systemctl enable --now via-vpn >/dev/null 2>&1 || die "could not start via-vpn.service"
-  ok "via-vpn.service is $(systemctl is-active via-vpn)"
+  systemctl is-active --quiet via-vpn 2>/dev/null || die "via-vpn.service didn't start - see: systemctl status via-vpn"
+  ok "via-vpn.service is running"
 
   if [[ -f /etc/xdg/autostart/via-auto.desktop ]]; then
     warn "The package starts the VIA GUI automatically at every login."
@@ -193,7 +234,7 @@ cmd_install() {
   fi
 
   step "Importing Exeter's root CA into the VIA keystore"
-  [[ -s $CACHE_DIR/$ROOT_CA ]] || curl -fsSL -o "$CACHE_DIR/$ROOT_CA" "$DL_BASE/$ROOT_CA"
+  download "$ROOT_CA"
   say "  VIA keeps certificates in a keystore protected by a password of ${B}your choice${N}."
   hint "The first password you use here becomes the keystore password - pick a new one"
   hint "(not your University password) and remember it; every exeter-vpn command asks for it."
@@ -315,7 +356,7 @@ cmd_disconnect() {
 
 tunnel_ip()  { ip -4 -o addr show "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1; }
 tunnel_mtu() { cat "/sys/class/net/$IFACE/mtu" 2>/dev/null; }
-vpn_dns()    { resolvectl dns "$IFACE" 2>/dev/null | sed 's/^[^:]*: *//' | awk '{print $1}'; }
+vpn_dns()    { has_resolved || return 0; resolvectl dns "$IFACE" 2>/dev/null | sed 's/^[^:]*: *//' | awk '{print $1}'; }
 probe_host() { local d; d=$(vpn_dns); echo "${d:-${CAMPUS_DNS[0]}}"; }
 
 # -------------------------------------------------------------------------- mtu
@@ -402,7 +443,8 @@ cmd_status() {
   printf '  %-14s %s\n' "Address" "$(tunnel_ip)"
   printf '  %-14s %s\n' "Interface" "$IFACE, MTU $(tunnel_mtu)"
   printf '  %-14s %s\n' "Routing" "$full, $rt routes"
-  if [[ -n $(vpn_dns) ]]; then printf '  %-14s %s\n' "DNS" "$(resolvectl dns "$IFACE" 2>/dev/null | sed 's/^[^:]*: *//')"
+  if ! has_resolved; then printf '  %-14s %s\n' "DNS" "/etc/resolv.conf: $(awk '$1=="nameserver"{printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)"
+  elif [[ -n $(vpn_dns) ]]; then printf '  %-14s %s\n' "DNS" "$(resolvectl dns "$IFACE" 2>/dev/null | sed 's/^[^:]*: *//')"
   else printf '  %-14s %s!%s none set on %s - campus-only names won'"'"'t resolve; fix: exeter-vpn dns\n' "DNS" "$Y" "$N" "$IFACE"; fi
   if ping -c2 -W2 -q "$dns" >/dev/null 2>&1; then
     printf '  %-14s %s✔%s campus DNS answers ping\n' "Reachability" "$G" "$N"
@@ -422,11 +464,14 @@ cmd_doctor() {
   local problems=0
   p() { problems=$((problems+1)); }
   step "Checking your setup"
-  if via_installed; then ok "VIA client installed ($(rpm -q via 2>/dev/null || echo unknown))"
+  if via_installed; then ok "VIA client installed ($(via_version))"
   else bad "VIA client not installed"; hint "fix: exeter-vpn install"; p; fi
 
   if systemctl is-active --quiet via-vpn 2>/dev/null; then ok "via-vpn.service running"
   else bad "via-vpn.service not running"; hint "fix: sudo systemctl enable --now via-vpn"; p; fi
+
+  if has_resolved; then ok "systemd-resolved running (exeter-vpn dns can fix campus DNS)"
+  else hint "no systemd-resolved: DNS comes from /etc/resolv.conf (exeter-vpn dns only explains the fix)"; fi
 
   if [[ -n $(ls -A "$VIA_DIR/storage" 2>/dev/null) ]]; then ok "VIA keystore exists (CA import done at some point)"
   else warn "no VIA keystore yet"; hint "fix: exeter-vpn install (imports the root CA)"; p; fi
@@ -506,6 +551,17 @@ cmd_dns() {
   local servers=()
   read -ra servers < <(grep -a -oP 'dns :"\K[0-9.,]+' "$SERVICE_LOG" 2>/dev/null | tail -1 | tr ',' ' ') || true
   (( ${#servers[@]} )) || servers=("${CAMPUS_DNS[@]}")
+  if ! has_resolved; then
+    # Without systemd-resolved, DNS comes from /etc/resolv.conf, which NetworkManager or resolvconf own.
+    # Rewriting it here would fight them, so explain instead.
+    warn "systemd-resolved isn't running, so DNS comes from /etc/resolv.conf, which this tool doesn't edit."
+    hint "Current: $(awk '$1=="nameserver"{printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)"
+    hint "Campus DNS servers: ${servers[*]}. Either put them first in /etc/resolv.conf while connected:"
+    hint "  $(printf 'nameserver %s; ' "${servers[@]}")"
+    hint "or install systemd-resolved (sudo apt install systemd-resolved) and run exeter-vpn dns again."
+    getent hosts www.exeter.ac.uk >/dev/null && ok "www.exeter.ac.uk resolves" || warn "www.exeter.ac.uk doesn't resolve"
+    return 0
+  fi
   if [[ -z $(vpn_dns) ]]; then
     sudo resolvectl dns "$IFACE" "${servers[@]}" || die "could not set the DNS servers."
     ok "campus DNS servers set on $IFACE: ${servers[*]}"
@@ -559,7 +615,7 @@ cmd_forget-keystore() {
 cmd_help() {
   cat <<EOF
 
-  ${B}exeter-vpn${N} ${D}v$VERSION${N} - University of Exeter VPN (Aruba VIA) on Fedora
+  ${B}exeter-vpn${N} ${D}v$VERSION${N} - University of Exeter VPN (Aruba VIA) on Fedora and Ubuntu/Debian
 
   ${B}Usage:${N} exeter-vpn <command> [options]
 

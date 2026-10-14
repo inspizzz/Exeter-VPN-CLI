@@ -5,9 +5,10 @@ Humans: see [README.md](README.md).
 
 ## What this repo is
 
-A guide and a single-file bash CLI (`bin/exeter-vpn`) for connecting Fedora Linux to the
+A guide and a single-file bash CLI (`bin/exeter-vpn`) for connecting Fedora Linux (and Ubuntu / Debian) to the
 University of Exeter VPN (`remote.exeter.ac.uk`, HPE Aruba VIA 4.7.6). There's no build step and no
-dependencies beyond `bash`, `curl`, `iproute2`, `systemd-resolved`, and the proprietary `via` RPM.
+dependencies beyond `bash`, `curl`, `iproute2`, `systemd-resolved` (optional on Debian), and the proprietary
+`via` package (RPM on Fedora/RHEL, `.deb` on Ubuntu/Debian; `install` picks by `dnf`/`apt-get`).
 
 ```
 bin/exeter-vpn              the CLI (all logic lives here)
