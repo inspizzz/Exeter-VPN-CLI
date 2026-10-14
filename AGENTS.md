@@ -37,7 +37,8 @@ private/                    git-ignored; the maintainer's personal notes - never
    (`<via_mtu>` 1250 gives 1246; 1240 gives 1230; 1220 gives 1214). Symptom: downloads fine, but uploads, large API
    requests and post-quantum TLS hellos hang. Raising the interface MTU later doesn't raise the cap, and
    starting lower lowers it, so never "lower until it works" blindly or copy someone's number (e.g. 1400).
-   `connect` measures the cap and sets the interface to it. Test over IPv4 (`curl -4`): IPv6 bypasses the
+   `connect` measures the cap, sets the interface to it, and starts VIA there next time. Starting at 1246
+   gives a cap of exactly 1246 (verified), so later connects need no sudo. Test over IPv4 (`curl -4`): IPv6 bypasses the
    tunnel, so a working browser proves nothing.
 9. VIA may not register the pushed campus DNS servers with systemd-resolved (`status` shows "DNS none
    set"). Public names still resolve via the home router, but campus-only names don't. `exeter-vpn dns` fixes it.
