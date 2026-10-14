@@ -92,7 +92,8 @@ keystore_pw() {
 via_installed() { command -v via-cli >/dev/null 2>&1; }
 need_via() { via_installed || die "the VIA client is not installed - run ${B}exeter-vpn install${N} first."; }
 gui_running() { pgrep -x via-ui >/dev/null 2>&1; }
-tunnel_up() { ip -br addr show "$IFACE" 2>/dev/null | grep -q .; }
+# The via_vpn link outlives the tunnel (left DOWN, no address), so require an IPv4 address.
+tunnel_up() { ip -4 -o addr show "$IFACE" 2>/dev/null | grep -q .; }
 
 stop_gui() { # only one VIA client (GUI or CLI) may run at a time
   gui_running || return 0
@@ -247,6 +248,16 @@ cmd_connect() {
   step "Connecting"
   hint "If your phone buzzes, approve the request."
   spin "bringing up the tunnel" quiet via -t 180 -k "$KEYPW" vpn connect || true
+  # A fresh install has no saved credentials; VIA refuses before contacting the gateway, so no MFA push was sent.
+  if ! tunnel_up && grep -q 'User name required' "$QLOG" 2>/dev/null; then
+    hint "VIA has no saved sign-in yet - it needs your University password once."
+    ensure_user; http_init
+    local pw; read_secret pw "University password for $EXETER_USER"
+    [[ -n $pw ]] || die "a password is required."
+    (umask 077; printf '%s' "$pw" >"$TMP/pw"); unset pw
+    spin "bringing up the tunnel" quiet via -t 180 -k "$KEYPW" vpn connect \
+      -u "$EXETER_USER" --userpassfile "$TMP/pw" || true
+  fi
   local i; for i in {1..20}; do tunnel_up && break; sleep 1; done
   if tunnel_up; then
     ok "connected - your VPN address is ${B}$(tunnel_ip)${N}"
