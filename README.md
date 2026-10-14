@@ -1,4 +1,4 @@
-# Exeter VPN on Fedora (and Ubuntu / Debian)
+# Exeter VPN CLI
 
 Connect to the **University of Exeter VPN** (`remote.exeter.ac.uk`, Aruba VIA) from **Fedora Linux**
 (and Ubuntu / Debian), with a small command-line tool, `exeter-vpn`, that wraps the steps that are fiddly on Linux.
@@ -32,8 +32,8 @@ $ exeter-vpn status
 ## Quick start
 
 ```bash
-git clone https://github.com/inspizzz/Exeter-VPN-Fedora.git
-cd Exeter-VPN-Fedora
+git clone https://github.com/inspizzz/Exeter-VPN-CLI.git
+cd Exeter-VPN-CLI
 ./install.sh            # puts `exeter-vpn` in ~/.local/bin (+ bash completion)
 
 exeter-vpn install      # downloads the official VIA client from exeter.ac.uk, installs it, imports the CA

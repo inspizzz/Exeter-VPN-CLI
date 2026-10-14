@@ -2,7 +2,7 @@
 # exeter-vpn - a friendly wrapper around the Aruba VIA client for the
 # University of Exeter VPN (remote.exeter.ac.uk) on Fedora / RHEL and Ubuntu / Debian.
 #
-# https://github.com/inspizzz/Exeter-VPN-Fedora  - MIT licence. Not affiliated with the University.
+# https://github.com/inspizzz/Exeter-VPN-CLI  - MIT licence. Not affiliated with the University.
 set -euo pipefail
 
 VERSION="0.1.0"
