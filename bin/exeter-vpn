@@ -96,8 +96,11 @@ keystore_pw() {
 via_installed() { command -v via-cli >/dev/null 2>&1; }
 need_via() { via_installed || die "the VIA client is not installed - run ${B}exeter-vpn install${N} first."; }
 gui_running() { pgrep -x via-ui >/dev/null 2>&1; }
-# The via_vpn link outlives the tunnel (left DOWN, no address), so require an IPv4 address.
-tunnel_up() { ip -4 -o addr show "$IFACE" 2>/dev/null | grep -q .; }
+# The via_vpn link outlives the tunnel: left DOWN, with no address after a failed connect but with the old
+# address after a disconnect. So require both the UP flag and an IPv4 address.
+tunnel_up() {
+  ip -o link show "$IFACE" 2>/dev/null | grep -q '[<,]UP[,>]' && ip -4 -o addr show "$IFACE" 2>/dev/null | grep -q .
+}
 
 stop_gui() { # only one VIA client (GUI or CLI) may run at a time
   gui_running || return 0
