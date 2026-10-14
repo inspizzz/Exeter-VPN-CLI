@@ -143,8 +143,11 @@ More detail: [docs/troubleshooting.md](docs/troubleshooting.md) and [docs/how-it
   user on the machine. Run `sudo chmod 600 ~/.via/vpn_service_config.xml` (`exeter-vpn doctor` checks for this).
 - `exeter-vpn` prompts for your password and never stores it. You can point `EXETER_VPN_PASSFILE` at a
   mode-600 file if you really want to.
-- `via-cli` takes the keystore password as a command-line argument, so other local users can briefly see
-  it in `ps`. Another reason not to reuse your University password for it.
+- The VIA keystore password: the first time you type it, `exeter-vpn` offers to keep it in your desktop
+  keyring (GNOME Keyring / KDE Wallet, via `secret-tool`), so `connect` and `disconnect` stop asking.
+  `exeter-vpn forget-keystore` removes it. It's handed to `via-cli` through a mode-600 temp file
+  (`--keypassfile`), not on the command line where `ps` would show it. Still, don't reuse your University
+  password for it.
 
 ## Ubuntu / Debian
 

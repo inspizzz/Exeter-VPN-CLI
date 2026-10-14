@@ -1,7 +1,7 @@
 # bash completion for exeter-vpn
 _exeter_vpn() {
   local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
-  local cmds="install login config connect disconnect up down status gui doctor logs mtu dns clean help version"
+  local cmds="install login config connect disconnect up down status gui doctor logs mtu dns clean forget-keystore help version"
   if (( COMP_CWORD == 1 )); then COMPREPLY=($(compgen -W "$cmds" -- "$cur")); return; fi
   case ${COMP_WORDS[1]} in
     login)  COMPREPLY=($(compgen -W "--pin --passfile" -- "$cur")); [[ $prev == --passfile ]] && COMPREPLY=($(compgen -f -- "$cur")) ;;

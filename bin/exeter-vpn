@@ -86,10 +86,31 @@ read_secret() { # read_secret VAR "prompt"
   read -rsp "  $2: " __v; echo >&2
   printf -v "$1" '%s' "$__v"
 }
-keystore_pw() {
-  if [[ -n ${EXETER_VPN_KEYSTORE:-} ]]; then KEYPW=$EXETER_VPN_KEYSTORE; return; fi
-  read_secret KEYPW "VIA keystore password"
-  [[ -n $KEYPW ]] || die "the keystore password cannot be empty."
+# The VIA keystore password can live in the desktop keyring (Secret Service: GNOME Keyring, KDE Wallet), so
+# connect/disconnect don't prompt. It reaches via-cli through a mode-600 file, never argv (visible in ps).
+KEYRING=(service exeter-vpn type via-keystore)
+KEYFILE=""; KEYPW_FROM=""
+keyring_ok() { command -v secret-tool >/dev/null 2>&1 && [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]]; }
+keystore_pw() { # sets KEYFILE (once per run)
+  [[ -n $KEYFILE ]] && return 0
+  local pw=""
+  if [[ -n ${EXETER_VPN_KEYSTORE:-} ]]; then pw=$EXETER_VPN_KEYSTORE; KEYPW_FROM=env
+  elif keyring_ok && pw=$(secret-tool lookup "${KEYRING[@]}" 2>/dev/null) && [[ -n $pw ]]; then KEYPW_FROM=keyring
+  else read_secret pw "VIA keystore password"; KEYPW_FROM=prompt; fi
+  [[ -n $pw ]] || die "the keystore password cannot be empty."
+  http_init
+  KEYFILE="$TMP/keystore"; (umask 077; printf '%s' "$pw" >"$KEYFILE")
+}
+remember_keystore() { # after via-cli accepted a typed password, offer to keep it in the keyring
+  [[ $KEYPW_FROM == prompt && -t 0 ]] && keyring_ok || return 0
+  ask "Remember the keystore password in your desktop keyring, so you aren't asked again?" y || return 0
+  if secret-tool store --label="exeter-vpn: VIA keystore password" "${KEYRING[@]}" <"$KEYFILE"; then
+    ok "saved in your keyring (remove it with: exeter-vpn forget-keystore)"; KEYPW_FROM=keyring
+  else warn "couldn't save it to the keyring - you'll be asked next time."; fi
+}
+keystore_hint() { # after a failure: a stale keyring entry is a likely cause
+  [[ $KEYPW_FROM == keyring ]] && hint "If you changed the keystore password: exeter-vpn forget-keystore, then retry."
+  return 0
 }
 
 # ------------------------------------------------------------------------- via
@@ -117,7 +138,7 @@ via_session() { via-cli session start >/dev/null 2>&1 || true; }
 
 # ------------------------------------------------------------------------- http
 TMP=""; JAR=""
-http_init() { TMP=$(mktemp -d); chmod 700 "$TMP"; JAR="$TMP/cookies"; trap 'rm -rf "$TMP"' EXIT; }
+http_init() { [[ -n $TMP ]] && return 0; TMP=$(mktemp -d); chmod 700 "$TMP"; JAR="$TMP/cookies"; trap 'rm -rf "$TMP"' EXIT; }
 http() { # http OUTFILE curl-args...  (retries only if the TCP connect itself hangs)
   local out=$1 i rc tc; shift
   for i in 1 2 3 4 5; do
@@ -177,7 +198,7 @@ cmd_install() {
   hint "The first password you use here becomes the keystore password - pick a new one"
   hint "(not your University password) and remember it; every exeter-vpn command asks for it."
   stop_gui; via_session; keystore_pw
-  if quiet via -k "$KEYPW" cert import --CA --user "$CACHE_DIR/$ROOT_CA"; then ok "root CA imported"
+  if quiet via --keypassfile "$KEYFILE" cert import --CA --user "$CACHE_DIR/$ROOT_CA"; then ok "root CA imported"; remember_keystore
   else warn "CA import reported an error (it may already be imported):"; show_qlog; fi
 
   step "Done"
@@ -245,8 +266,8 @@ cmd_login() {
   [[ -n $gw_mtu ]] && save_mtu gateway "$gw_mtu" "(gateway default)"
   sed -i "s|<via_mtu>[0-9]*</via_mtu>|<via_mtu>$(want_mtu "$(net_id)")</via_mtu>|" "$PROFILE_XML"
   stop_gui; via_session; keystore_pw
-  quiet via -k "$KEYPW" profile side-load || { show_qlog; die "side-load failed (wrong keystore password?)."; }
-  ok "profile loaded"
+  quiet via --keypassfile "$KEYFILE" profile side-load || { show_qlog; keystore_hint; die "side-load failed (wrong keystore password?)."; }
+  ok "profile loaded"; remember_keystore
   say "\n  Next: ${B}exeter-vpn connect${N}"
 }
 
@@ -259,7 +280,7 @@ cmd_connect() {
   set_profile_mtu "$(want_mtu "$id")" || true
   step "Connecting"
   hint "If your phone buzzes, approve the request."
-  spin "bringing up the tunnel" quiet via -t 180 -k "$KEYPW" vpn connect || true
+  spin "bringing up the tunnel" quiet via -t 180 --keypassfile "$KEYFILE" vpn connect || true
   # A fresh install has no saved credentials; VIA refuses before contacting the gateway, so no MFA push was sent.
   if ! tunnel_up && grep -q 'User name required' "$QLOG" 2>/dev/null; then
     hint "VIA has no saved sign-in yet - it needs your University password once."
@@ -267,16 +288,17 @@ cmd_connect() {
     local pw; read_secret pw "University password for $EXETER_USER"
     [[ -n $pw ]] || die "a password is required."
     (umask 077; printf '%s' "$pw" >"$TMP/pw"); unset pw
-    spin "bringing up the tunnel" quiet via -t 180 -k "$KEYPW" vpn connect \
+    spin "bringing up the tunnel" quiet via -t 180 --keypassfile "$KEYFILE" vpn connect \
       -u "$EXETER_USER" --userpassfile "$TMP/pw" || true
   fi
   local i; for i in {1..20}; do tunnel_up && break; sleep 1; done
   if tunnel_up; then
     ok "connected - your VPN address is ${B}$(tunnel_ip)${N}"
+    remember_keystore
     check_mtu "$id"
     hint "Check it with: exeter-vpn status    (only use this CLI *or* the GUI, never both)"
   else
-    bad "the tunnel did not come up."; show_qlog
+    bad "the tunnel did not come up."; show_qlog; keystore_hint
     hint "Run 'exeter-vpn logs' and 'exeter-vpn doctor' for details."; exit 1
   fi
 }
@@ -285,10 +307,10 @@ cmd_disconnect() {
   need_via
   tunnel_up || { ok "not connected"; return; }
   stop_gui; via_session; keystore_pw
-  spin "disconnecting" quiet via -t 60 -k "$KEYPW" vpn disconnect || true
+  spin "disconnecting" quiet via -t 60 --keypassfile "$KEYFILE" vpn disconnect || true
   local i; for i in {1..10}; do tunnel_up || break; sleep 1; done
-  if tunnel_up; then show_qlog; die "still connected - see 'exeter-vpn logs'."; fi
-  ok "disconnected"
+  if tunnel_up; then show_qlog; keystore_hint; die "still connected - see 'exeter-vpn logs'."; fi
+  ok "disconnected"; remember_keystore
 }
 
 tunnel_ip()  { ip -4 -o addr show "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1; }
@@ -322,7 +344,7 @@ profile_mtu() { grep -oP '(?<=<via_mtu>)[0-9]+' "$PROFILE_XML" 2>/dev/null | hea
 set_profile_mtu() { # write N into the profile and reload it into VIA (needs a session and KEYPW)
   [[ $(profile_mtu) == "$1" ]] && return 0
   sed -i "s|<via_mtu>[0-9]*</via_mtu>|<via_mtu>$1</via_mtu>|" "$PROFILE_XML"
-  quiet via -k "$KEYPW" profile side-load || { show_qlog; warn "could not reload the profile with MTU $1"; return 1; }
+  quiet via --keypassfile "$KEYFILE" profile side-load || { show_qlog; warn "could not reload the profile with MTU $1"; return 1; }
 }
 fits() { ping -c3 -i0.2 -W1 -M do -s $(( $1 - 28 )) "$2" >/dev/null 2>&1; }  # does a $1-byte packet get through?
 path_mtu() { # largest packet that crosses the tunnel, up to the current MTU; empty if it can't be measured
@@ -514,6 +536,12 @@ cmd_config() {
   esac
 }
 
+cmd_forget-keystore() {
+  keyring_ok || die "no desktop keyring available (needs secret-tool and a desktop session)."
+  if secret-tool clear "${KEYRING[@]}" 2>/dev/null; then ok "keystore password removed from your keyring"
+  else ok "no keystore password was stored"; fi
+}
+
 cmd_help() {
   cat <<EOF
 
@@ -525,6 +553,7 @@ cmd_help() {
     ${C}install${N}             download + install the VIA client, import Exeter's root CA
     ${C}login${N} [--pin]       sign in (password + phone approval), fetch & load your VPN profile
     ${C}config${N} [user X]     show or set your username
+    ${C}forget-keystore${N}     remove the VIA keystore password from your desktop keyring
 
   ${B}Daily use${N}
     ${C}connect${N}             bring the VPN up
@@ -542,7 +571,7 @@ cmd_help() {
   ${B}Environment${N}
     EXETER_USER            username (else asked once and saved to $CONFIG_FILE)
     EXETER_VPN_PASSFILE    read the University password from this file instead of prompting
-    EXETER_VPN_KEYSTORE    VIA keystore password (else prompted)
+    EXETER_VPN_KEYSTORE    VIA keystore password (else your keyring, else prompted)
     NO_COLOR               disable colours
 
   ${D}Only one VIA client may run at a time: use this CLI or the GUI, not both.${N}
@@ -553,7 +582,7 @@ EOF
 main() {
   local cmd=${1:-help}; shift || true
   case $cmd in
-    install|login|connect|disconnect|status|doctor|mtu|dns|gui|logs|clean|config) "cmd_$cmd" "$@" ;;
+    install|login|connect|disconnect|status|doctor|mtu|dns|gui|logs|clean|config|forget-keystore) "cmd_$cmd" "$@" ;;
     up) cmd_connect "$@" ;;
     down) cmd_disconnect "$@" ;;
     -h|--help|help) cmd_help ;;
