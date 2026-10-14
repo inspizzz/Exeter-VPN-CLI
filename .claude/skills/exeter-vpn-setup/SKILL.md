@@ -1,0 +1,39 @@
+---
+name: exeter-vpn-setup
+description: Set up the University of Exeter VPN (Aruba VIA, remote.exeter.ac.uk) on Fedora from scratch - install the client, import the CA, sign in with MFA, download the profile and connect. Use when the user asks to install, set up or get started with the Exeter VPN.
+---
+
+# Exeter VPN first-time setup
+
+Walk the user through this in order. Run the read-only checks yourself. The user runs anything that
+prompts for a password or needs their phone (suggest the `! <command>` prefix so output lands in chat).
+
+## 0. Preconditions (check, don't assume)
+- Fedora/RHEL with `dnf`: `command -v dnf`. For Debian/Ubuntu, point to the README section.
+- **Off campus, not on eduroam**: `nmcli -t -f active,ssid dev wifi | grep '^yes'`.
+- The user has Microsoft Authenticator (push) or a phone number as the default MFA method
+  (<https://mysignins.microsoft.com/security-info>, which they check and change themselves).
+
+## 1. Install the CLI
+`./install.sh` (safe: copies into `~/.local/bin`). Confirm `exeter-vpn --version`.
+
+## 2. Install the VIA client (needs sudo, so ask first)
+User runs `! exeter-vpn install`. It downloads the official installer from exeter.ac.uk, extracts the RPM,
+`dnf install`s it, enables `via-vpn.service`, offers to disable the GUI autostart, and imports `rootca.pem`.
+Tell them **before** they run it: the keystore password they type now is *new and of their choosing*
+(not the University password), and they must remember it.
+
+## 3. Sign in and fetch the profile
+User runs `! exeter-vpn login`. They enter the University password and approve the Authenticator
+notification within ~30 s. Success prints the profile name (e.g. `UoE-VIA-Connection`).
+- If it reports the **"VIA Next/New Pin"** page, the username or password is wrong. Do **not** start changing
+  MFA settings. Have them verify the password by signing in at mysignins.microsoft.com, then retry.
+  Stop after 2–3 failures (MFA lockout risk).
+
+## 4. Connect and verify
+User runs `! exeter-vpn connect`. Then you run `exeter-vpn status` and `exeter-vpn doctor` and explain the
+result. If names don't resolve, offer `exeter-vpn dns`. If big transfers hang, `exeter-vpn mtu probe`.
+
+## 5. Finish
+- Remind them of the one-client rule (GUI **or** CLI; the GUI kills CLI tunnels when it starts).
+- If `doctor` flags `~/.via/vpn_service_config.xml` permissions, suggest `sudo chmod 600` on it.

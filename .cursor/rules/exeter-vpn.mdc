@@ -1,0 +1,10 @@
+---
+description: Exeter VPN repo conventions and safety rules
+globs:
+alwaysApply: true
+---
+
+Follow AGENTS.md at the repo root. Key points: `bin/exeter-vpn` is a single-file bash CLI with no
+dependencies; "VIA Next/New Pin" means wrong credentials; only one VIA client (GUI or CLI) at a time;
+ask before connect/disconnect/login/install or sudo; never commit or print credentials, profile.xml,
+cookies, HAR files, or `private/`; test with `bash -n` and read-only `exeter-vpn doctor|status`.

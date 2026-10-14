@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(exeter-vpn status)",
+      "Bash(exeter-vpn doctor)",
+      "Bash(exeter-vpn logs:*)",
+      "Bash(exeter-vpn config)",
+      "Bash(exeter-vpn help)",
+      "Bash(exeter-vpn --version)",
+      "Bash(bin/exeter-vpn status)",
+      "Bash(bin/exeter-vpn doctor)",
+      "Bash(bin/exeter-vpn logs:*)",
+      "Bash(bin/exeter-vpn help)",
+      "Bash(bash -n:*)",
+      "Bash(shellcheck:*)",
+      "Bash(ip addr:*)",
+      "Bash(ip route:*)",
+      "Bash(ip -br:*)",
+      "Bash(resolvectl status:*)",
+      "Bash(pgrep:*)"
+    ]
+  }
+}

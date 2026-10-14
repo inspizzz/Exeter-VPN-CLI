@@ -1,0 +1,11 @@
+# personal notes, credentials and anything the VPN client writes
+private/
+*.har
+debug-*
+profile.xml
+userpass
+*.pem
+*.rpm
+*_bin
+*.log
+.claude/settings.local.json

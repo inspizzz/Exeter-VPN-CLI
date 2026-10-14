@@ -1,0 +1,461 @@
+#!/usr/bin/env bash
+# exeter-vpn - a friendly wrapper around the Aruba VIA client for the
+# University of Exeter VPN (remote.exeter.ac.uk) on Fedora / RHEL-like Linux.
+#
+# https://github.com/inspizzz/Exeter-VPN-Fedora  - MIT licence. Not affiliated with the University.
+set -euo pipefail
+
+VERSION="0.1.0"
+GATEWAY_HOST="remote.exeter.ac.uk"
+GATEWAY="https://$GATEWAY_HOST"
+AUTH_PROFILE="UoE-VIA-Auth"
+DL_BASE="https://www.exeter.ac.uk/v8media/universityofexeter/it/documents/networks/vpn"
+VIA_INSTALLER="via-4.7.6.2601123-rpm.x86_64_bin"
+ROOT_CA="rootca.pem"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/exeter-vpn"
+CONFIG_FILE="$CONFIG_DIR/config"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/exeter-vpn"
+VIA_DIR="$HOME/.via"
+PROFILE_XML="$VIA_DIR/profile.xml"
+SERVICE_LOG="/usr/share/via/logs/app-vpn.log"
+APP_LOG="$VIA_DIR/app-via.log"
+IFACE="via_vpn"
+
+# --------------------------------------------------------------------------- ui
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  B=$'\e[1m' D=$'\e[2m' R=$'\e[31m' G=$'\e[32m' Y=$'\e[33m' C=$'\e[36m' N=$'\e[0m'
+else
+  B="" D="" R="" G="" Y="" C="" N=""
+fi
+say()  { printf '%s\n' "$*"; }
+step() { printf '\n%s==>%s %s%s%s\n' "$C" "$N" "$B" "$*" "$N"; }
+ok()   { printf '  %s✔%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*" >&2; }
+bad()  { printf '  %s✘%s %s\n' "$R" "$N" "$*" >&2; }
+hint() { printf '    %s%s%s\n' "$D" "$*" "$N"; }
+die()  { printf '%serror:%s %s\n' "$R$B" "$N" "$*" >&2; exit 1; }
+
+ask() { # ask "question" [default y|n]
+  local def=${2:-n} prompt reply
+  [[ $def == y ]] && prompt="[Y/n]" || prompt="[y/N]"
+  [[ -t 0 ]] || { [[ $def == y ]]; return; }
+  read -rp "  $1 $prompt " reply || true
+  reply=${reply:-$def}
+  [[ $reply =~ ^[Yy] ]]
+}
+
+spin() { # spin "message" cmd...  - runs cmd in the background with a spinner
+  local msg=$1; shift
+  if [[ ! -t 2 ]]; then "$@"; return; fi
+  "$@" & local pid=$! i=0 frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' rc=0
+  while kill -0 "$pid" 2>/dev/null; do
+    printf '\r  %s%s%s %s ' "$C" "${frames:i++%${#frames}:1}" "$N" "$msg" >&2
+    sleep 0.1
+  done
+  wait "$pid" || rc=$?
+  printf '\r\e[K' >&2
+  return $rc
+}
+
+need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed${2:+ ($2)}."; }
+
+# ----------------------------------------------------------------------- config
+load_config() { EXETER_USER="${EXETER_USER:-}"; [[ -f $CONFIG_FILE ]] && source "$CONFIG_FILE"; return 0; }
+save_config() {
+  mkdir -p "$CONFIG_DIR"; chmod 700 "$CONFIG_DIR"
+  printf 'EXETER_USER=%q\n' "$EXETER_USER" > "$CONFIG_FILE"
+}
+ensure_user() {
+  load_config
+  if [[ -z $EXETER_USER ]]; then
+    say "  Your University sign-in name, e.g. ${B}ab123@exeter.ac.uk${N}"
+    hint "(the full email address worked reliably for us; Exeter's own guide says the bare username)"
+    read -rp "  Username: " EXETER_USER
+    [[ -n $EXETER_USER ]] || die "a username is required."
+    save_config; ok "saved to $CONFIG_FILE"
+  fi
+}
+
+read_secret() { # read_secret VAR "prompt"
+  local __v
+  read -rsp "  $2: " __v; echo >&2
+  printf -v "$1" '%s' "$__v"
+}
+keystore_pw() {
+  if [[ -n ${EXETER_VPN_KEYSTORE:-} ]]; then KEYPW=$EXETER_VPN_KEYSTORE; return; fi
+  read_secret KEYPW "VIA keystore password"
+  [[ -n $KEYPW ]] || die "the keystore password cannot be empty."
+}
+
+# ------------------------------------------------------------------------- via
+via_installed() { command -v via-cli >/dev/null 2>&1; }
+need_via() { via_installed || die "the VIA client is not installed - run ${B}exeter-vpn install${N} first."; }
+gui_running() { pgrep -x via-ui >/dev/null 2>&1; }
+tunnel_up() { ip -br addr show "$IFACE" 2>/dev/null | grep -q .; }
+
+stop_gui() { # only one VIA client (GUI or CLI) may run at a time
+  gui_running || return 0
+  warn "The VIA GUI is running; only one VIA client can be used at a time."
+  hint "Closing the GUI does not drop an active tunnel."
+  ask "Close the GUI now?" y || die "close the VIA GUI and try again."
+  pkill -x via-ui || true; sleep 1
+}
+via() { via-cli "$@"; }
+QLOG="${TMPDIR:-/tmp}/exeter-vpn-$UID.log"
+quiet() { "$@" >"$QLOG" 2>&1; }   # run quietly, keep output for error messages
+show_qlog() { [[ -s $QLOG ]] && sed 's/^/    /' "$QLOG" | tail -5 >&2; return 0; }
+via_session() { via-cli session start >/dev/null 2>&1 || true; }
+
+# ------------------------------------------------------------------------- http
+TMP=""; JAR=""
+http_init() { TMP=$(mktemp -d); chmod 700 "$TMP"; JAR="$TMP/cookies"; trap 'rm -rf "$TMP"' EXIT; }
+http() { # http OUTFILE curl-args...  (retries only if the TCP connect itself hangs)
+  local out=$1 i rc tc; shift
+  for i in 1 2 3 4 5; do
+    rc=0
+    tc=$(curl -sS --connect-timeout 12 -m "${HTTP_MAX:-120}" -c "$JAR" -b "$JAR" \
+           -o "$out" -w '%{time_connect}' "$@" 2>"$TMP/curl.err") || rc=$?
+    (( rc == 0 )) && return 0
+    if [[ $rc =~ ^(7|28|35|56)$ && ( -z $tc || $tc == 0.000000 ) ]]; then
+      printf '\r\e[K  %s…%s gateway did not answer, retrying (%d/5)\n' "$Y" "$N" "$i" >&2
+      continue
+    fi
+    sed 's/^/    /' "$TMP/curl.err" >&2; return "$rc"
+  done
+  return 28
+}
+has_session() { awk '$6=="VIA_SESSION" && $7!="" {f=1} END {exit !f}' "$JAR" 2>/dev/null; }
+page_reason() { grep -A3 'id="reason"' "$1" 2>/dev/null | sed 's/<[^>]*>//g' | tr -s ' \n' ' ' | sed 's/^ *//;s/ *$//'; }
+
+# ===================================================================== commands
+cmd_install() {
+  step "Installing the Aruba VIA client"
+  need curl; need sudo
+  command -v dnf >/dev/null || die "this installer targets Fedora/RHEL (dnf). See README for Debian/Ubuntu."
+  if via_installed; then ok "VIA already installed ($(rpm -q via 2>/dev/null || echo via-cli))"
+  else
+    mkdir -p "$CACHE_DIR"
+    for f in "$VIA_INSTALLER" "$ROOT_CA"; do
+      if [[ -s $CACHE_DIR/$f ]]; then ok "$f (cached)"; continue; fi
+      spin "downloading $f from exeter.ac.uk" curl -fsSL -o "$CACHE_DIR/$f" "$DL_BASE/$f" || die "download of $f failed."
+      ok "downloaded $f"
+    done
+    chmod +x "$CACHE_DIR/$VIA_INSTALLER"
+    # The official .._bin is a self-extracting installer; its 'extract' mode yields a normal RPM.
+    (cd "$CACHE_DIR" && "./$VIA_INSTALLER" extract via.rpm >/dev/null) || die "could not extract the RPM."
+    ok "extracted via.rpm"
+    say "  Installing with dnf (you may be asked for your sudo password)…"
+    sudo dnf install -y "$CACHE_DIR/via.rpm" || die "dnf install failed."
+    ok "installed $(rpm -q via)"
+  fi
+
+  step "Starting the VIA background service"
+  sudo systemctl enable --now via-vpn >/dev/null 2>&1 || die "could not start via-vpn.service"
+  ok "via-vpn.service is $(systemctl is-active via-vpn)"
+
+  if [[ -f /etc/xdg/autostart/via-auto.desktop ]]; then
+    warn "The package starts the VIA GUI automatically at every login."
+    if ask "Disable GUI autostart (recommended if you use this CLI)?" y; then
+      mkdir -p "$HOME/.config/autostart"
+      printf '[Desktop Entry]\nType=Application\nName=VIA\nHidden=true\n' > "$HOME/.config/autostart/via-auto.desktop"
+      ok "autostart disabled for your user"
+    fi
+  fi
+
+  step "Importing Exeter's root CA into the VIA keystore"
+  [[ -s $CACHE_DIR/$ROOT_CA ]] || curl -fsSL -o "$CACHE_DIR/$ROOT_CA" "$DL_BASE/$ROOT_CA"
+  say "  VIA keeps certificates in a keystore protected by a password of ${B}your choice${N}."
+  hint "The first password you use here becomes the keystore password - pick a new one"
+  hint "(not your University password) and remember it; every exeter-vpn command asks for it."
+  stop_gui; via_session; keystore_pw
+  if quiet via -k "$KEYPW" cert import --CA --user "$CACHE_DIR/$ROOT_CA"; then ok "root CA imported"
+  else warn "CA import reported an error (it may already be imported):"; show_qlog; fi
+
+  step "Done"
+  say "  Next: ${B}exeter-vpn login${N}   (needs to be off campus, not on eduroam)"
+}
+
+cmd_login() {
+  local pin_mode=0 passfile=""
+  while (( $# )); do case $1 in
+    --pin) pin_mode=1 ;;
+    --passfile) passfile=${2:?--passfile needs a file}; shift ;;
+    *) die "unknown option for login: $1" ;;
+  esac; shift; done
+  need curl; need_via; ensure_user; http_init
+
+  local pw
+  if [[ -n $passfile ]]; then pw=$(<"$passfile")
+  elif [[ -n ${EXETER_VPN_PASSFILE:-} ]]; then pw=$(<"$EXETER_VPN_PASSFILE")
+  else read_secret pw "University password for $EXETER_USER"; fi
+  [[ -n $pw ]] || die "empty password."
+
+  step "Signing in to $GATEWAY_HOST as $EXETER_USER"
+  say "  ${Y}📱 Approve the Microsoft Authenticator notification on your phone${N}"
+  hint "(or answer the call and press #). You have about 30 seconds."
+  ( umask 077; printf '%s' "$pw" > "$TMP/pw" ); unset pw   # keeps the password out of the process list
+  spin "waiting for the gateway / your approval" http "$TMP/login.html" \
+    --data-urlencode 'opcode=login' --data-urlencode 'url=/via/login' --data-urlencode 'needxml=0' \
+    --data-urlencode "uid=$EXETER_USER" --data-urlencode "passwd@$TMP/pw" --data-urlencode "vap=$AUTH_PROFILE" \
+    "$GATEWAY/via/login" || die "could not reach the gateway (are you off campus and online?)."
+  rm -f "$TMP/pw"
+
+  if has_session; then
+    ok "signed in (MFA approved)"
+  elif grep -q 'name="pin"' "$TMP/login.html"; then
+    bad "The gateway answered with a \"VIA Next/New Pin\" page instead of a session."
+    say "  ${B}This almost always means the username or password is wrong${N} - the gateway shows"
+    say "  this page for ${B}any${N} wrong password. Other causes: the push was denied or timed out."
+    hint "Check the password by signing in at https://mysignins.microsoft.com, then retry."
+    if (( pin_mode )); then
+      local code; read -rp "  One-time code: " code
+      spin "checking code" http "$TMP/pin.html" --data-urlencode 'cmd=nextpin' \
+        --data-urlencode "pin=${code//[^0-9]/}" "$GATEWAY/via/login" || true
+      has_session || die "code not accepted: $(page_reason "$TMP/pin.html")"
+      ok "signed in with one-time code"
+    else
+      hint "If your account genuinely uses one-time codes, rerun with: exeter-vpn login --pin"
+      exit 1
+    fi
+  else
+    die "sign-in failed: $(page_reason "$TMP/login.html" || true)"
+  fi
+
+  step "Downloading your VPN profile"
+  HTTP_MAX=60 spin "fetching profile" http "$TMP/profile.xml" "$GATEWAY/via/config?ikever=3&ak=1" \
+    || die "profile download failed."
+  grep -q '<via_profile' "$TMP/profile.xml" || die "the gateway did not return a VPN profile (session expired?)."
+  mkdir -p "$VIA_DIR"; install -m 600 "$TMP/profile.xml" "$PROFILE_XML"
+  local pname role
+  pname=$(grep -m1 -oP '(?<=<name>)[^<]+' "$PROFILE_XML" || true)
+  role=$(grep -m1 -oP '(?<=<role>)[^<]+' "$PROFILE_XML" || true)
+  ok "profile ${B}${pname:-?}${N} (role ${role:-?}) saved to $PROFILE_XML"
+
+  step "Loading the profile into VIA"
+  stop_gui; via_session; keystore_pw
+  quiet via -k "$KEYPW" profile side-load || { show_qlog; die "side-load failed (wrong keystore password?)."; }
+  ok "profile loaded"
+  say "\n  Next: ${B}exeter-vpn connect${N}"
+}
+
+cmd_connect() {
+  need_via
+  if tunnel_up; then ok "already connected ($(tunnel_ip))"; return; fi
+  [[ -s $PROFILE_XML ]] || die "no VPN profile yet - run ${B}exeter-vpn login${N} first."
+  stop_gui; via_session; keystore_pw
+  step "Connecting"
+  hint "If your phone buzzes, approve the request."
+  spin "bringing up the tunnel" quiet via -t 180 -k "$KEYPW" vpn connect || true
+  local i; for i in {1..20}; do tunnel_up && break; sleep 1; done
+  if tunnel_up; then
+    ok "connected - your VPN address is ${B}$(tunnel_ip)${N}"
+    hint "Check it with: exeter-vpn status    (only use this CLI *or* the GUI, never both)"
+  else
+    bad "the tunnel did not come up."; show_qlog
+    hint "Run 'exeter-vpn logs' and 'exeter-vpn doctor' for details."; exit 1
+  fi
+}
+
+cmd_disconnect() {
+  need_via
+  tunnel_up || { ok "not connected"; return; }
+  stop_gui; via_session; keystore_pw
+  spin "disconnecting" quiet via -t 60 -k "$KEYPW" vpn disconnect || true
+  local i; for i in {1..10}; do tunnel_up || break; sleep 1; done
+  if tunnel_up; then show_qlog; die "still connected - see 'exeter-vpn logs'."; fi
+  ok "disconnected"
+}
+
+tunnel_ip()  { ip -4 -o addr show "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1; }
+tunnel_mtu() { cat "/sys/class/net/$IFACE/mtu" 2>/dev/null; }
+vpn_dns()    { resolvectl dns "$IFACE" 2>/dev/null | sed 's/^[^:]*: *//' | awk '{print $1}'; }
+
+cmd_status() {
+  printf '\n  %sExeter VPN%s  %s\n\n' "$B" "$N" "$GATEWAY_HOST"
+  if ! tunnel_up; then
+    printf '  %-14s %s●%s disconnected\n' "Tunnel" "$R" "$N"
+    gui_running && printf '  %-14s %s\n' "GUI" "running (via-ui)"
+    say ""; hint "Connect with: exeter-vpn connect"; return 1
+  fi
+  local dns rt full="split"
+  dns=$(vpn_dns)
+  rt=$(ip route show dev "$IFACE" | wc -l)
+  ip route show dev "$IFACE" | grep -q '^0.0.0.0/1' && full="full tunnel (all traffic)"
+  printf '  %-14s %s●%s connected\n' "Tunnel" "$G" "$N"
+  printf '  %-14s %s\n' "Address" "$(tunnel_ip)"
+  printf '  %-14s %s\n' "Interface" "$IFACE, MTU $(tunnel_mtu)"
+  printf '  %-14s %s\n' "Routing" "$full, $rt routes"
+  printf '  %-14s %s\n' "DNS" "$(resolvectl dns "$IFACE" 2>/dev/null | sed 's/^[^:]*: *//')"
+  if [[ -n $dns ]] && ping -c2 -W2 -q "$dns" >/dev/null 2>&1; then
+    printf '  %-14s %s✔%s campus DNS answers ping\n' "Reachability" "$G" "$N"
+  else
+    printf '  %-14s %s!%s campus DNS did not answer ping\n' "Reachability" "$Y" "$N"
+  fi
+  if getent hosts www.exeter.ac.uk >/dev/null 2>&1; then
+    printf '  %-14s %s✔%s names resolve\n' "Name lookup" "$G" "$N"
+  else
+    printf '  %-14s %s✘%s names do not resolve - try: exeter-vpn dns\n' "Name lookup" "$R" "$N"
+  fi
+  gui_running && printf '  %-14s %s\n' "GUI" "running - do not also use the CLI"
+  say ""
+}
+
+cmd_doctor() {
+  local problems=0
+  p() { problems=$((problems+1)); }
+  step "Checking your setup"
+  if via_installed; then ok "VIA client installed ($(rpm -q via 2>/dev/null || echo unknown))"
+  else bad "VIA client not installed"; hint "fix: exeter-vpn install"; p; fi
+
+  if systemctl is-active --quiet via-vpn 2>/dev/null; then ok "via-vpn.service running"
+  else bad "via-vpn.service not running"; hint "fix: sudo systemctl enable --now via-vpn"; p; fi
+
+  if [[ -n $(ls -A "$VIA_DIR/storage" 2>/dev/null) ]]; then ok "VIA keystore exists (CA import done at some point)"
+  else warn "no VIA keystore yet"; hint "fix: exeter-vpn install (imports the root CA)"; p; fi
+
+  if grep -qs '<via_profile' "$PROFILE_XML"; then ok "VPN profile present"
+  else warn "no downloaded VPN profile"; hint "fix: exeter-vpn login"; p; fi
+
+  if gui_running; then warn "VIA GUI is running - don't use the CLI at the same time"
+  else ok "no competing VIA GUI"; fi
+
+  local ssid src
+  ssid=$(nmcli -t -f active,ssid dev wifi 2>/dev/null | awk -F: '$1=="yes"{print $2; exit}' || true)
+  src=$(ip route get 144.173.255.40 2>/dev/null | grep -oP 'src \K\S+' || true)
+  if [[ $ssid == eduroam || ( -n $src && $src == 144.173.* && $(ip route get 144.173.255.40) != *"$IFACE"* ) ]]; then
+    bad "you seem to be on campus / eduroam - the VPN only works from outside"; p
+  else ok "off-campus network${ssid:+ ($ssid)}"; fi
+
+  local code="" i
+  for i in 1 2 3; do
+    code=$(curl -s -o /dev/null --connect-timeout 8 -m 15 -w '%{http_code}' "$GATEWAY/" 2>/dev/null || true)
+    [[ $code =~ ^[1-5] ]] && break
+  done
+  if [[ $code =~ ^[1-5] ]]; then ok "gateway $GATEWAY_HOST reachable (HTTP $code)"
+  else bad "gateway $GATEWAY_HOST not reachable"; hint "the path is sometimes lossy; retry, or check your internet"; p; fi
+
+  local svc="$VIA_DIR/vpn_service_config.xml"
+  if [[ -f $svc ]] && [[ $(stat -c %a "$svc") != 600 ]] && grep -qs '<user_password>.' "$svc"; then
+    warn "$svc stores your password and is readable by other users"
+    hint "fix: sudo chmod 600 $svc"; p
+  fi
+  if [[ -f /etc/xdg/autostart/via-auto.desktop && ! -f $HOME/.config/autostart/via-auto.desktop ]]; then
+    hint "note: the VIA GUI autostarts at login and will drop a CLI tunnel when it starts"
+  fi
+
+  if tunnel_up; then ok "tunnel is up ($(tunnel_ip), MTU $(tunnel_mtu))"; else hint "tunnel is down"; fi
+  say ""
+  (( problems == 0 )) && say "  ${G}${B}All good.${N}" || say "  ${Y}${B}$problems thing(s) to fix above.${N}"
+}
+
+cmd_mtu() {
+  tunnel_up || die "connect first."
+  local cur; cur=$(tunnel_mtu)
+  case ${1:-} in
+    "") say "  $IFACE MTU is ${B}$cur${N}"; hint "probe the best value: exeter-vpn mtu probe   set one: exeter-vpn mtu 1300" ;;
+    probe)
+      local dns lo=1000 hi=$((cur - 28)) mid
+      dns=$(vpn_dns); [[ -n $dns ]] || die "no VPN DNS server to probe against."
+      ping -c1 -W2 -M do -s $lo "$dns" >/dev/null 2>&1 || die "even ${lo}-byte packets fail - the tunnel looks broken."
+      while (( lo < hi )); do
+        mid=$(( (lo + hi + 1) / 2 ))
+        if ping -c2 -i0.2 -W2 -M do -s $mid "$dns" >/dev/null 2>&1; then lo=$mid; else hi=$((mid - 1)); fi
+      done
+      ok "largest packet that gets through: $((lo + 28)) bytes (current MTU $cur)"
+      (( lo + 28 + 16 < cur )) && hint "consider: exeter-vpn mtu $((lo + 28))" || hint "the current MTU is fine." ;;
+    *[!0-9]*) die "usage: exeter-vpn mtu [probe|<number>]" ;;
+    *) sudo ip link set dev "$IFACE" mtu "$1" && ok "MTU set to $1 (until the next reconnect)" ;;
+  esac
+}
+
+cmd_dns() {
+  tunnel_up || die "connect first."
+  sudo resolvectl domain "$IFACE" ex.ac.uk '~.' && ok "all DNS lookups now go to the campus DNS servers"
+  getent hosts www.exeter.ac.uk >/dev/null && ok "www.exeter.ac.uk resolves" || warn "still not resolving"
+}
+
+cmd_gui() {
+  need_via
+  tunnel_up && warn "starting the GUI disconnects the current tunnel and reconnects it."
+  # Qt5 app on a Plasma 6 desktop: without the Qt5 Breeze style some text boxes render invisible.
+  QT_QPA_PLATFORMTHEME=generic QT_STYLE_OVERRIDE=Fusion setsid via-ui >/dev/null 2>&1 < /dev/null &
+  ok "VIA GUI started"
+}
+
+cmd_logs() {
+  local follow=0 n=40
+  while (( $# )); do case $1 in -f|--follow) follow=1 ;; -n) n=$2; shift ;; *) die "usage: exeter-vpn logs [-f] [-n N]" ;; esac; shift; done
+  [[ -r $SERVICE_LOG ]] || die "no service log at $SERVICE_LOG"
+  local filter='crypted frame|IPSEC_applyEx|get_custom_tranform|EVENT_LOOP|wsm_curl_log|free_data'
+  local pick='ERROR|WARN|status|connect|Connected|EAP SUCCESS|Deleted|MTU|reason'
+  if (( follow )); then tail -n0 -F "$SERVICE_LOG" | grep -a --line-buffered -vE "$filter" | grep -a --line-buffered -E "$pick"
+  else grep -a -vE "$filter" "$SERVICE_LOG" | grep -a -E "$pick" | tail -n "$n"; fi
+}
+
+cmd_clean() {
+  local files=("$VIA_DIR"/debug-* "$VIA_DIR"/config.xml-tmp* "$VIA_DIR"/cookie.txt-*)
+  local existing=(); for f in "${files[@]}"; do [[ -e $f ]] && existing+=("$f"); done
+  [[ -d $CACHE_DIR ]] && existing+=("$CACHE_DIR")
+  (( ${#existing[@]} )) || { ok "nothing to clean"; return; }
+  printf '    %s\n' "${existing[@]}"
+  ask "Delete these temporary files?" y && rm -rf "${existing[@]}" && ok "cleaned"
+}
+
+cmd_config() {
+  load_config
+  case ${1:-} in
+    "") say "  user = ${EXETER_USER:-<not set>}"; hint "$CONFIG_FILE" ;;
+    user) EXETER_USER=${2:?usage: exeter-vpn config user <name>}; save_config; ok "user = $EXETER_USER" ;;
+    *) die "usage: exeter-vpn config [user <name>]" ;;
+  esac
+}
+
+cmd_help() {
+  cat <<EOF
+
+  ${B}exeter-vpn${N} ${D}v$VERSION${N} - University of Exeter VPN (Aruba VIA) on Fedora
+
+  ${B}Usage:${N} exeter-vpn <command> [options]
+
+  ${B}Set up${N}
+    ${C}install${N}             download + install the VIA client, import Exeter's root CA
+    ${C}login${N} [--pin]       sign in (password + phone approval), fetch & load your VPN profile
+    ${C}config${N} [user X]     show or set your username
+
+  ${B}Daily use${N}
+    ${C}connect${N}             bring the VPN up
+    ${C}disconnect${N}          take it down
+    ${C}status${N}              address, routes, DNS and reachability at a glance
+    ${C}gui${N}                 open the VIA GUI with a fix for invisible text on KDE
+
+  ${B}When things go wrong${N}
+    ${C}doctor${N}              check installation, service, network, profile, permissions
+    ${C}logs${N} [-f] [-n N]    show (or follow) the useful part of the VPN service log
+    ${C}mtu${N} [probe|N]       show, probe or set the tunnel MTU
+    ${C}dns${N}                 send all DNS through the campus resolvers
+    ${C}clean${N}               remove VIA temp/debug files and the download cache
+
+  ${B}Environment${N}
+    EXETER_USER            username (else asked once and saved to $CONFIG_FILE)
+    EXETER_VPN_PASSFILE    read the University password from this file instead of prompting
+    EXETER_VPN_KEYSTORE    VIA keystore password (else prompted)
+    NO_COLOR               disable colours
+
+  ${D}Only one VIA client may run at a time: use this CLI or the GUI, not both.${N}
+
+EOF
+}
+
+main() {
+  local cmd=${1:-help}; shift || true
+  case $cmd in
+    install|login|connect|disconnect|status|doctor|mtu|dns|gui|logs|clean|config) "cmd_$cmd" "$@" ;;
+    up) cmd_connect "$@" ;;
+    down) cmd_disconnect "$@" ;;
+    -h|--help|help) cmd_help ;;
+    -V|--version|version) say "exeter-vpn $VERSION" ;;
+    *) cmd_help; die "unknown command: $cmd" ;;
+  esac
+}
+main "$@"
