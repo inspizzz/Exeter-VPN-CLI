@@ -11,7 +11,7 @@ back. The `!` prefix has no TTY, so sudo prompts fail there.
 
 ## 0. Preconditions (check, don't assume)
 - Fedora/RHEL with `dnf`, or Ubuntu/Debian with `apt-get`: `command -v dnf apt-get`. Ubuntu/Debian is only
-  tested up to the install step, so say so, and see the README's Ubuntu / Debian section for the differences.
+  tested up to the install step, so say so, and see docs/manual-install.md for how the .deb differs.
 - **Off campus, not on eduroam**: `nmcli -t -f active,ssid dev wifi | grep '^yes'`.
 - The user has Microsoft Authenticator (push) or a phone number as the default MFA method
   (<https://mysignins.microsoft.com/security-info>, which they check and change themselves).

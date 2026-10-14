@@ -16,6 +16,7 @@ install.sh                  installs the CLI to ~/.local/bin + bash completion
 completions/exeter-vpn.bash bash completion
 docs/how-it-works.md        gateway login flow, tunnel details, log locations
 docs/troubleshooting.md     symptom -> fix
+docs/manual-install.md      installing VIA by hand (RPM and .deb), .deb quirks
 .claude/skills/             Claude Code skills (setup, troubleshoot)
 private/                    git-ignored; the maintainer's personal notes - never read into commits
 ```
