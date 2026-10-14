@@ -32,13 +32,22 @@ Start with `exeter-vpn doctor`. It checks the most common problems.
   starts. Check `exeter-vpn logs` for `force disconnecting any existing on applications start`.
 
 **Connected, but some things hang (web pages, SSH, large transfers)**
-: MTU. `exeter-vpn mtu probe` finds the largest packet that gets through, then set it with
-  `exeter-vpn mtu <N>`. A colleague fixed an "endless loop / connected but no data" VPN this way.
-  The setting lasts until the next reconnect.
+: MTU. `connect` measures and fixes it per network (see the README's MTU section), but networks change.
+  `exeter-vpn mtu probe` finds the largest packet that gets through, and `exeter-vpn mtu <N>` sets that value
+  and remembers it for this network. A colleague fixed an "endless loop / connected but no data" VPN this way.
+  The right value depends on the network, so don't copy someone else's number. If ping is blocked on your
+  network, try `exeter-vpn mtu 1200`.
 
-**Names under `ex.ac.uk` don't resolve**
-: `exeter-vpn dns` runs `resolvectl domain via_vpn ex.ac.uk '~.'`, which is Exeter's documented workaround
-  and sends all lookups to the campus resolvers.
+**Names under `ex.ac.uk` don't resolve, or `status` says "DNS none set"**
+: VIA receives the campus DNS servers (`dns :"144.173.119.22,144.173.119.23"` in the service log) but
+  doesn't always register them with systemd-resolved, so lookups keep going to your home router. Public
+  names still work, but campus-only ones don't. `exeter-vpn dns` sets those servers on `via_vpn` and then
+  runs `resolvectl domain via_vpn ex.ac.uk '~.'`, Exeter's documented workaround, to send all lookups to
+  them. It lasts until the next reconnect.
+
+**`connect` says "User name required" / `VIA_ERROR_NORESOURCE`**
+: VIA has no saved sign-in, which is normal on a fresh install. Current `exeter-vpn connect` handles this by
+  asking for your University password once. Older versions just failed.
 
 **Gateway sometimes doesn't answer / downloads hang**
 : The route to 144.173.255.40 is lossy (we saw roughly 1 in 6 TCP connects hang). Retry. `exeter-vpn`

@@ -21,6 +21,10 @@ PROFILE_XML="$VIA_DIR/profile.xml"
 SERVICE_LOG="/usr/share/via/logs/app-vpn.log"
 APP_LOG="$VIA_DIR/app-via.log"
 IFACE="via_vpn"
+CAMPUS_DNS=(144.173.119.22 144.173.119.23)   # what the gateway pushes; fallback when VIA doesn't register them
+MTU_FILE="$CONFIG_DIR/mtu"                   # remembered MTU per network: "<router-mac> <mtu> <label>"
+MTU_DEFAULT=1250                             # the gateway's <via_mtu> as of 2026
+MTU_FALLBACK=1200                            # used when the path can't be measured (ping blocked)
 
 # --------------------------------------------------------------------------- ui
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -234,6 +238,9 @@ cmd_login() {
   ok "profile ${B}${pname:-?}${N} (role ${role:-?}) saved to $PROFILE_XML"
 
   step "Loading the profile into VIA"
+  local gw_mtu; gw_mtu=$(profile_mtu)
+  [[ -n $gw_mtu ]] && save_mtu gateway "$gw_mtu" "(gateway default)"
+  sed -i "s|<via_mtu>[0-9]*</via_mtu>|<via_mtu>$(want_mtu "$(net_id)")</via_mtu>|" "$PROFILE_XML"
   stop_gui; via_session; keystore_pw
   quiet via -k "$KEYPW" profile side-load || { show_qlog; die "side-load failed (wrong keystore password?)."; }
   ok "profile loaded"
@@ -245,6 +252,8 @@ cmd_connect() {
   if tunnel_up; then ok "already connected ($(tunnel_ip))"; return; fi
   [[ -s $PROFILE_XML ]] || die "no VPN profile yet - run ${B}exeter-vpn login${N} first."
   stop_gui; via_session; keystore_pw
+  local id; id=$(net_id)
+  set_profile_mtu "$(want_mtu "$id")" || true
   step "Connecting"
   hint "If your phone buzzes, approve the request."
   spin "bringing up the tunnel" quiet via -t 180 -k "$KEYPW" vpn connect || true
@@ -261,6 +270,7 @@ cmd_connect() {
   local i; for i in {1..20}; do tunnel_up && break; sleep 1; done
   if tunnel_up; then
     ok "connected - your VPN address is ${B}$(tunnel_ip)${N}"
+    check_mtu "$id"
     hint "Check it with: exeter-vpn status    (only use this CLI *or* the GUI, never both)"
   else
     bad "the tunnel did not come up."; show_qlog
@@ -281,6 +291,69 @@ cmd_disconnect() {
 tunnel_ip()  { ip -4 -o addr show "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1; }
 tunnel_mtu() { cat "/sys/class/net/$IFACE/mtu" 2>/dev/null; }
 vpn_dns()    { resolvectl dns "$IFACE" 2>/dev/null | sed 's/^[^:]*: *//' | awk '{print $1}'; }
+probe_host() { local d; d=$(vpn_dns); echo "${d:-${CAMPUS_DNS[0]}}"; }
+
+# -------------------------------------------------------------------------- mtu
+# The largest packet the tunnel carries depends on the network you connect from (router, ISP, hotspot),
+# so it's measured after each connect and remembered per network. VIA applies <via_mtu> from the profile
+# itself when the tunnel comes up, so a remembered value is written there before connecting: no sudo.
+net_id() { # MAC of the default router: identifies the network you're on (empty if unknown)
+  local gw dev
+  read -r gw dev < <(ip -4 route show default 2>/dev/null |
+    awk '{for (i = 1; i < NF; i++) { if ($i == "via") g = $(i+1); if ($i == "dev") d = $(i+1) } print g, d; exit}') || true
+  [[ -n ${gw:-} && -n ${dev:-} ]] || return 0
+  ip neigh show "$gw" dev "$dev" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "lladdr") { print $(i+1); exit }}'
+}
+net_label() { nmcli -t -f active,ssid dev wifi 2>/dev/null | awk -F: '$1=="yes"{print $2; exit}' || true; }
+saved_mtu() { [[ -n ${1:-} && -f $MTU_FILE ]] && awk -v id="$1" '$1==id {print $2; exit}' "$MTU_FILE"; return 0; }
+forget_mtu() { [[ -f $MTU_FILE ]] && awk -v id="$1" '$1!=id' "$MTU_FILE" >"$MTU_FILE.tmp" && mv "$MTU_FILE.tmp" "$MTU_FILE"; return 0; }
+save_mtu() { # save_mtu ID MTU [LABEL]
+  [[ -n $1 ]] || return 0
+  mkdir -p "$CONFIG_DIR"; chmod 700 "$CONFIG_DIR"
+  forget_mtu "$1"; printf '%s %s %s\n' "$1" "$2" "${3:-}" >>"$MTU_FILE"
+}
+want_mtu() { # the MTU to put in the profile for network ID
+  local m; m=$(saved_mtu "$1"); m=${m:-$(saved_mtu gateway)}; echo "${m:-$MTU_DEFAULT}"
+}
+profile_mtu() { grep -oP '(?<=<via_mtu>)[0-9]+' "$PROFILE_XML" 2>/dev/null | head -1 || true; }
+set_profile_mtu() { # write N into the profile and reload it into VIA (needs a session and KEYPW)
+  [[ $(profile_mtu) == "$1" ]] && return 0
+  sed -i "s|<via_mtu>[0-9]*</via_mtu>|<via_mtu>$1</via_mtu>|" "$PROFILE_XML"
+  quiet via -k "$KEYPW" profile side-load || { show_qlog; warn "could not reload the profile with MTU $1"; return 1; }
+}
+fits() { ping -c3 -i0.2 -W1 -M do -s $(( $1 - 28 )) "$2" >/dev/null 2>&1; }  # does a $1-byte packet get through?
+path_mtu() { # largest packet that crosses the tunnel, up to the current MTU; empty if it can't be measured
+  local host cur lo=1000 hi mid
+  host=$(probe_host); cur=$(tunnel_mtu)
+  if fits "$cur" "$host"; then echo "$cur"; return; fi
+  fits $lo "$host" || return 0
+  hi=$((cur - 1))
+  while (( lo < hi )); do
+    mid=$(( (lo + hi + 1) / 2 ))
+    if fits $mid "$host"; then lo=$mid; else hi=$((mid - 1)); fi
+  done
+  echo "$lo"
+}
+safe_mtu() { echo $(( ($1 - 2) / 10 * 10 )); }   # a little under the measured limit, e.g. 1246 -> 1240
+
+check_mtu() { # after connect: measure, fix now if needed, remember for this network
+  local id=$1 cur max new label
+  cur=$(tunnel_mtu); label=$(net_label)
+  max=$(spin "checking the largest packet the tunnel carries" path_mtu)
+  if [[ -z $max ]]; then
+    [[ -n $(saved_mtu "$id") ]] && return 0
+    warn "couldn't measure the tunnel's packet size (ping blocked?) - using a safe $MTU_FALLBACK"
+    new=$MTU_FALLBACK
+  elif (( max >= cur )); then
+    ok "MTU $cur fits this network"; save_mtu "$id" "$cur" "$label"; return 0
+  else
+    new=$(safe_mtu "$max")
+    warn "MTU $cur is too big for this network: the largest packet that gets through is $max bytes"
+  fi
+  hint "Lowering it to $new and remembering that for ${label:-this network}, so later connects need no sudo."
+  if sudo ip link set dev "$IFACE" mtu "$new"; then save_mtu "$id" "$new" "$label"; ok "MTU set to $new"
+  else warn "MTU not changed - large transfers may stall. Fix with: exeter-vpn mtu $new"; fi
+}
 
 cmd_status() {
   printf '\n  %sExeter VPN%s  %s\n\n' "$B" "$N" "$GATEWAY_HOST"
@@ -290,15 +363,16 @@ cmd_status() {
     say ""; hint "Connect with: exeter-vpn connect"; return 1
   fi
   local dns rt full="split"
-  dns=$(vpn_dns)
+  dns=$(probe_host)
   rt=$(ip route show dev "$IFACE" | wc -l)
   ip route show dev "$IFACE" | grep -q '^0.0.0.0/1' && full="full tunnel (all traffic)"
   printf '  %-14s %s●%s connected\n' "Tunnel" "$G" "$N"
   printf '  %-14s %s\n' "Address" "$(tunnel_ip)"
   printf '  %-14s %s\n' "Interface" "$IFACE, MTU $(tunnel_mtu)"
   printf '  %-14s %s\n' "Routing" "$full, $rt routes"
-  printf '  %-14s %s\n' "DNS" "$(resolvectl dns "$IFACE" 2>/dev/null | sed 's/^[^:]*: *//')"
-  if [[ -n $dns ]] && ping -c2 -W2 -q "$dns" >/dev/null 2>&1; then
+  if [[ -n $(vpn_dns) ]]; then printf '  %-14s %s\n' "DNS" "$(resolvectl dns "$IFACE" 2>/dev/null | sed 's/^[^:]*: *//')"
+  else printf '  %-14s %s!%s none set on %s - campus-only names won'"'"'t resolve; fix: exeter-vpn dns\n' "DNS" "$Y" "$N" "$IFACE"; fi
+  if ping -c2 -W2 -q "$dns" >/dev/null 2>&1; then
     printf '  %-14s %s✔%s campus DNS answers ping\n' "Reachability" "$G" "$N"
   else
     printf '  %-14s %s!%s campus DNS did not answer ping\n' "Reachability" "$Y" "$N"
@@ -361,27 +435,42 @@ cmd_doctor() {
 }
 
 cmd_mtu() {
-  tunnel_up || die "connect first."
-  local cur; cur=$(tunnel_mtu)
+  local id label saved; id=$(net_id); label=$(net_label); saved=$(saved_mtu "$id")
   case ${1:-} in
-    "") say "  $IFACE MTU is ${B}$cur${N}"; hint "probe the best value: exeter-vpn mtu probe   set one: exeter-vpn mtu 1300" ;;
+    "")
+      if tunnel_up; then say "  $IFACE MTU is ${B}$(tunnel_mtu)${N}"; else say "  not connected"; fi
+      say "  saved for ${label:-this network}: ${saved:-nothing yet (measured on the next connect)}"
+      hint "exeter-vpn mtu probe | mtu <N> | mtu reset [--all]" ;;
     probe)
-      local dns lo=1000 hi=$((cur - 28)) mid
-      dns=$(vpn_dns); [[ -n $dns ]] || die "no VPN DNS server to probe against."
-      ping -c1 -W2 -M do -s $lo "$dns" >/dev/null 2>&1 || die "even ${lo}-byte packets fail - the tunnel looks broken."
-      while (( lo < hi )); do
-        mid=$(( (lo + hi + 1) / 2 ))
-        if ping -c2 -i0.2 -W2 -M do -s $mid "$dns" >/dev/null 2>&1; then lo=$mid; else hi=$((mid - 1)); fi
-      done
-      ok "largest packet that gets through: $((lo + 28)) bytes (current MTU $cur)"
-      (( lo + 28 + 16 < cur )) && hint "consider: exeter-vpn mtu $((lo + 28))" || hint "the current MTU is fine." ;;
-    *[!0-9]*) die "usage: exeter-vpn mtu [probe|<number>]" ;;
-    *) sudo ip link set dev "$IFACE" mtu "$1" && ok "MTU set to $1 (until the next reconnect)" ;;
+      tunnel_up || die "connect first."
+      local cur max; cur=$(tunnel_mtu)
+      max=$(spin "probing" path_mtu)
+      [[ -n $max ]] || die "no answer from $(probe_host) even for small packets: ping is blocked, or the tunnel is broken."
+      if (( max >= cur )); then ok "MTU $cur fits: $cur-byte packets get through"
+      else ok "largest packet that gets through: $max bytes (current MTU $cur)"; hint "fix: exeter-vpn mtu $(safe_mtu "$max")"; fi ;;
+    reset)
+      if [[ ${2:-} == --all ]]; then rm -f "$MTU_FILE"; ok "forgot the MTU for every network"
+      else forget_mtu "$id"; ok "forgot the MTU for ${label:-this network}; it's measured again on the next connect"; fi ;;
+    *[!0-9]*) die "usage: exeter-vpn mtu [probe | <number> | reset [--all]]" ;;
+    *)
+      (( $1 >= 576 && $1 <= 1500 )) || die "the MTU must be between 576 and 1500."
+      if tunnel_up; then sudo ip link set dev "$IFACE" mtu "$1" || die "could not set the MTU."; fi
+      save_mtu "$id" "$1" "$label"
+      ok "MTU $1 saved for ${label:-this network}; it's applied on every connect from there" ;;
   esac
 }
 
 cmd_dns() {
   tunnel_up || die "connect first."
+  # VIA doesn't always hand its DNS servers to systemd-resolved; routing lookups to a link
+  # without servers would break DNS, so set them first (the ones the gateway pushed, per the log).
+  local servers=()
+  read -ra servers < <(grep -a -oP 'dns :"\K[0-9.,]+' "$SERVICE_LOG" 2>/dev/null | tail -1 | tr ',' ' ') || true
+  (( ${#servers[@]} )) || servers=("${CAMPUS_DNS[@]}")
+  if [[ -z $(vpn_dns) ]]; then
+    sudo resolvectl dns "$IFACE" "${servers[@]}" || die "could not set the DNS servers."
+    ok "campus DNS servers set on $IFACE: ${servers[*]}"
+  fi
   sudo resolvectl domain "$IFACE" ex.ac.uk '~.' && ok "all DNS lookups now go to the campus DNS servers"
   getent hosts www.exeter.ac.uk >/dev/null && ok "www.exeter.ac.uk resolves" || warn "still not resolving"
 }
@@ -443,8 +532,8 @@ cmd_help() {
   ${B}When things go wrong${N}
     ${C}doctor${N}              check installation, service, network, profile, permissions
     ${C}logs${N} [-f] [-n N]    show (or follow) the useful part of the VPN service log
-    ${C}mtu${N} [probe|N]       show, probe or set the tunnel MTU
-    ${C}dns${N}                 send all DNS through the campus resolvers
+    ${C}mtu${N} [probe|N|reset] show, probe or save the tunnel MTU (measured per network on connect)
+    ${C}dns${N}                 set the campus DNS servers and send all DNS through them
     ${C}clean${N}               remove VIA temp/debug files and the download cache
 
   ${B}Environment${N}

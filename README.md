@@ -36,12 +36,15 @@ cd Exeter-VPN-Fedora
 
 exeter-vpn install      # downloads the official VIA client from exeter.ac.uk, installs it, imports the CA
 exeter-vpn login        # password + approve on your phone -> downloads and loads your VPN profile
-exeter-vpn connect      # brings the tunnel up
+exeter-vpn connect      # brings the tunnel up (asks for your University password the first time)
 exeter-vpn status
 ```
 
 After the first time, you only need `exeter-vpn connect` and `exeter-vpn disconnect`. Run `login` again if
 the profile stops working, for example after a password change.
+
+`connect` also checks the largest packet the tunnel carries on your current network and fixes the MTU if
+VIA's default is too big (see [MTU](#mtu) below). That may ask for sudo once per network.
 
 Run `exeter-vpn doctor` whenever something seems wrong.
 
@@ -103,14 +106,34 @@ Pick one. `exeter-vpn` offers to close the GUI when needed.
 | Problem | Fix |
 |---|---|
 | GUI text boxes are blank or invisible (KDE Plasma 6) | `exeter-vpn gui`, or `QT_QPA_PLATFORMTHEME=generic QT_STYLE_OVERRIDE=Fusion via-ui`. Permanent fix: install the Qt5 Breeze style (`sudo dnf install plasma-breeze-qt5`) |
-| Connected, but web pages or SSH hang while small things like ping work | MTU. VIA usually sets 1250 itself. Check with `exeter-vpn mtu probe`, set with `exeter-vpn mtu 1300` (or lower) |
-| `*.ex.ac.uk` names don't resolve | `exeter-vpn dns`: Exeter's documented workaround, `resolvectl domain via_vpn ex.ac.uk '~.'` |
+| Connected, but web pages or SSH hang while small things like ping work | MTU, see [below](#mtu). `exeter-vpn mtu probe` checks it, `exeter-vpn mtu <N>` sets and remembers a value |
+| `*.ex.ac.uk` names don't resolve | `exeter-vpn dns`: sets the campus DNS servers on `via_vpn` (VIA sometimes doesn't) and applies Exeter's documented workaround, `resolvectl domain via_vpn ex.ac.uk '~.'` |
 | Requests to the gateway hang now and then | The path to `remote.exeter.ac.uk` is lossy, so retry. The tool retries automatically |
 | Gateway won't respond at all | Are you on eduroam or a campus network? Use a hotspot or home Wi-Fi |
 
-**MTU tip from a colleague:** the VPN "stayed in an endless loop and never connected, or connected but no
-data was exchanged" until the MTU was lowered. On our machine VIA already chose a safe MTU (1250), but if you
-see those symptoms, MTU is the first thing to try.
+### MTU
+
+The MTU is the largest packet the tunnel sends. Each packet is wrapped in an encrypted outer packet that must
+still fit through your own connection, so the right value depends on **the network you connect from** (home
+router, ISP, phone hotspot), not on your computer. If it's too big, oversized packets vanish silently: ping
+and small pages work, but large transfers, uploads and SSH hang. A colleague's VPN "stayed in an endless loop
+and never connected, or connected but no data was exchanged" until the MTU was lowered.
+
+The gateway's profile sets 1250. On one home network the largest packet that actually got through was 1246, so
+1250 was 4 bytes too big. Someone else's working value (e.g. 1400) won't necessarily work for you.
+
+`exeter-vpn connect` handles this per network:
+
+1. After connecting, it pings campus DNS with packets of different sizes (a few seconds).
+2. If the MTU is too big, it lowers it to just under the measured limit (sudo, once) and remembers that
+   value for this network (keyed by your router, in `~/.config/exeter-vpn/mtu`).
+3. Next time on that network, it writes the remembered value into the VIA profile (`<via_mtu>`) before
+   connecting, so VIA applies it itself and no sudo is needed.
+4. If ping is blocked and nothing can be measured, it uses a safe 1200.
+
+`exeter-vpn mtu` shows the current and remembered values. `mtu probe` re-measures, `mtu <N>` sets and remembers
+your own value, and `mtu reset [--all]` forgets it so it's measured again. Going too low only costs a little
+speed. Going too high makes things hang.
 
 More detail: [docs/troubleshooting.md](docs/troubleshooting.md) and [docs/how-it-works.md](docs/how-it-works.md).
 

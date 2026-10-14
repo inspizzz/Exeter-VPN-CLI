@@ -6,7 +6,8 @@ _exeter_vpn() {
   case ${COMP_WORDS[1]} in
     login)  COMPREPLY=($(compgen -W "--pin --passfile" -- "$cur")); [[ $prev == --passfile ]] && COMPREPLY=($(compgen -f -- "$cur")) ;;
     logs)   COMPREPLY=($(compgen -W "-f --follow -n" -- "$cur")) ;;
-    mtu)    COMPREPLY=($(compgen -W "probe 1400 1300 1250 1200" -- "$cur")) ;;
+    mtu)    if [[ $prev == reset ]]; then COMPREPLY=($(compgen -W "--all" -- "$cur"))
+            else COMPREPLY=($(compgen -W "probe reset 1240 1200" -- "$cur")); fi ;;
     config) COMPREPLY=($(compgen -W "user" -- "$cur")) ;;
   esac
 }

@@ -44,7 +44,10 @@ using your username and password, then brings up the `via_vpn` interface:
 - an address from the University range, e.g. `10.46.x.x/32`
 - a **full tunnel**: routes `0.0.0.0/1`, `128.0.0.0/1`-style splits plus a host route to the gateway
 - DNS `144.173.119.22` / `144.173.119.23`, search domain `ex.ac.uk`
-- MTU **1250** (VIA computes it from the path MTU; 1492 was detected on our PPPoE-style home link)
+- MTU **1250**, taken from `<via_mtu>` in the downloaded profile (the service log shows `mtu :"1250"`).
+  VIA also logs a `Computed Path MTU` for the outer link but doesn't derive the tunnel MTU from it. On one home
+  network only 1246-byte packets got through, so `exeter-vpn connect` measures the real limit per network and
+  writes a remembered value into `<via_mtu>` before connecting
 
 ## Logs
 
