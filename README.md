@@ -113,27 +113,39 @@ Pick one. `exeter-vpn` offers to close the GUI when needed.
 
 ### MTU
 
-The MTU is the largest packet the tunnel sends. Each packet is wrapped in an encrypted outer packet that must
-still fit through your own connection, so the right value depends on **the network you connect from** (home
-router, ISP, phone hotspot), not on your computer. If it's too big, oversized packets vanish silently: ping
-and small pages work, but large transfers, uploads and SSH hang. A colleague's VPN "stayed in an endless loop
-and never connected, or connected but no data was exchanged" until the MTU was lowered.
+The MTU is the largest packet your machine sends into the tunnel. If it's even slightly too big, those
+packets vanish without any error. Downloads and small requests still work, but **uploads, `git push`, large
+API requests and some TLS connections hang**. That's the "connected but no data was exchanged" problem a
+colleague fixed by lowering the MTU.
 
-The gateway's profile sets 1250. On one home network the largest packet that actually got through was 1246, so
-1250 was 4 bytes too big. Someone else's working value (e.g. 1400) won't necessarily work for you.
+What we measured (Aruba VIA 4.7.6, `remote.exeter.ac.uk`):
 
-`exeter-vpn connect` handles this per network:
+- **VIA drops outgoing packets a few bytes below the MTU it connected with.** With the gateway's
+  `<via_mtu>1250</via_mtu>`, the largest packet that gets out is **1246 bytes**. Connecting at 1240 gives 1230,
+  and 1220 gives 1214. It looks like 16-byte cipher-block rounding. Incoming packets aren't affected.
+- **Raising the interface MTU after connecting doesn't raise this cap**, and starting VIA lower lowers the cap
+  too. So "just lower it until it works" can slide downwards, and someone else's number (e.g. 1400) tells
+  you nothing.
+- **Big TLS hellos are the first casualty.** Modern clients send post-quantum key shares, making the very
+  first packet full-size, so some apps (e.g. CLI tools talking to APIs over IPv4) can't even connect while
+  a browser seems fine.
 
-1. After connecting, it pings campus DNS with packets of different sizes (a few seconds).
-2. If the MTU is too big, it lowers it to just under the measured limit (sudo, once) and remembers that
-   value for this network (keyed by your router, in `~/.config/exeter-vpn/mtu`).
-3. Next time on that network, it writes the remembered value into the VIA profile (`<via_mtu>`) before
-   connecting, so VIA applies it itself and no sudo is needed.
-4. If ping is blocked and nothing can be measured, it uses a safe 1200.
+`exeter-vpn connect` handles this:
 
-`exeter-vpn mtu` shows the current and remembered values. `mtu probe` re-measures, `mtu <N>` sets and remembers
-your own value, and `mtu reset [--all]` forgets it so it's measured again. Going too low only costs a little
-speed. Going too high makes things hang.
+1. After connecting, it pings campus DNS with different packet sizes to find the largest that gets out (a
+   few seconds).
+2. If the MTU is above that, it lowers the interface MTU to exactly that size (sudo) and remembers the value
+   for this network (keyed by your router, in `~/.config/exeter-vpn/mtu`).
+3. Next time on that network, it writes the value into the profile (`<via_mtu>`) before connecting, so VIA
+   starts at a size it actually carries, with no sudo. If that doesn't hold, it stops lowering the start
+   value and just fixes the MTU with sudo after each connect.
+
+`exeter-vpn mtu` shows the current and remembered values, `mtu probe` re-measures, `mtu <N>` sets and remembers
+a value (it warns if `N` doesn't get through), and `mtu reset [--all]` forgets it.
+
+**IPv6 bypasses the tunnel.** VIA only tunnels IPv4, so on a home network with IPv6, sites that have IPv6 go
+straight out, not through the VPN. That's why "the browser still works" isn't proof that the tunnel works.
+Test with `curl -4`.
 
 More detail: [docs/troubleshooting.md](docs/troubleshooting.md) and [docs/how-it-works.md](docs/how-it-works.md).
 

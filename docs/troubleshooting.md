@@ -31,12 +31,13 @@ Start with `exeter-vpn doctor`. It checks the most common problems.
 : Was the GUI just started, perhaps by the login autostart? It force-disconnects existing tunnels when it
   starts. Check `exeter-vpn logs` for `force disconnecting any existing on applications start`.
 
-**Connected, but some things hang (web pages, SSH, large transfers)**
-: MTU. `connect` measures and fixes it per network (see the README's MTU section), but networks change.
-  `exeter-vpn mtu probe` finds the largest packet that gets through, and `exeter-vpn mtu <N>` sets that value
-  and remembers it for this network. A colleague fixed an "endless loop / connected but no data" VPN this way.
-  The right value depends on the network, so don't copy someone else's number. If ping is blocked on your
-  network, try `exeter-vpn mtu 1200`.
+**Connected, but some things hang (uploads, `git push`, some apps or CLIs, SSH), while the browser works**
+: MTU. VIA drops outgoing packets above a cap a few bytes under the MTU it connected with (1250 gives 1246),
+  so full-size packets vanish. Downloads still work, which makes it confusing. `exeter-vpn mtu probe` shows
+  the cap, and `exeter-vpn mtu <N>` sets the interface to it. `connect` does this automatically. Raising the MTU
+  above the cap (e.g. `mtu 1250` on a session that connected at 1220) breaks things. A quick test is
+  `curl -4 --curves X25519 https://api.github.com` (small TLS hello) versus plain `curl -4 https://api.github.com`:
+  if only the first works, it's this. Browsers often look fine because sites with IPv6 bypass the tunnel.
 
 **Names under `ex.ac.uk` don't resolve, or `status` says "DNS none set"**
 : VIA receives the campus DNS servers (`dns :"144.173.119.22,144.173.119.23"` in the service log) but

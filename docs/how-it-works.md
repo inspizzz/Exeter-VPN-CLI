@@ -45,9 +45,11 @@ using your username and password, then brings up the `via_vpn` interface:
 - a **full tunnel**: routes `0.0.0.0/1`, `128.0.0.0/1`-style splits plus a host route to the gateway
 - DNS `144.173.119.22` / `144.173.119.23`, search domain `ex.ac.uk`
 - MTU **1250**, taken from `<via_mtu>` in the downloaded profile (the service log shows `mtu :"1250"`).
-  VIA also logs a `Computed Path MTU` for the outer link but doesn't derive the tunnel MTU from it. On one home
-  network only 1246-byte packets got through, so `exeter-vpn connect` measures the real limit per network and
-  writes a remembered value into `<via_mtu>` before connecting
+  `via_vpn` is a userspace `tun`; VIA encrypts itself and drops outgoing packets above roughly
+  `floor16(MTU) - 2` (1250 gives 1246, 1240 gives 1230, 1220 gives 1214; incoming packets are unaffected). `exeter-vpn connect`
+  measures this and sets the interface MTU to it. VIA's `Computed Path MTU` (1480 on a home link) is the
+  outer path, not this cap.
+- IPv4 only: IPv6 traffic isn't tunnelled, so on dual-stack networks it bypasses the VPN
 
 ## Logs
 

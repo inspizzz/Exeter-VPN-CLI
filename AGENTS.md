@@ -33,10 +33,12 @@ private/                    git-ignored; the maintainer's personal notes - never
 6. Username: the full `ab123@exeter.ac.uk` worked. Exeter's docs say the bare username. Don't claim either is required.
 7. The service log `/usr/share/via/logs/app-vpn.log` contains binary bytes, so always use `grep -a`.
    `Cann't possible to send crypted frame -8807` spam is harmless if traffic flows.
-8. The tunnel MTU comes from `<via_mtu>` in the gateway's profile (1250). The safe value depends on the
-   user's network (one home network passed only 1246), so `connect` measures it, lowers it if needed and
-   remembers it per network in `~/.config/exeter-vpn/mtu`. Don't recommend a fixed number from someone
-   else's network (e.g. 1400, which would be *higher* than the gateway's 1250).
+8. MTU: VIA drops *outgoing* packets above a cap a few bytes below the MTU it connected with
+   (`<via_mtu>` 1250 gives 1246; 1240 gives 1230; 1220 gives 1214). Symptom: downloads fine, but uploads, large API
+   requests and post-quantum TLS hellos hang. Raising the interface MTU later doesn't raise the cap, and
+   starting lower lowers it, so never "lower until it works" blindly or copy someone's number (e.g. 1400).
+   `connect` measures the cap and sets the interface to it. Test over IPv4 (`curl -4`): IPv6 bypasses the
+   tunnel, so a working browser proves nothing.
 9. VIA may not register the pushed campus DNS servers with systemd-resolved (`status` shows "DNS none
    set"). Public names still resolve via the home router, but campus-only names don't. `exeter-vpn dns` fixes it.
 

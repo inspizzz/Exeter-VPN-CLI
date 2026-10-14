@@ -319,9 +319,14 @@ vpn_dns()    { resolvectl dns "$IFACE" 2>/dev/null | sed 's/^[^:]*: *//' | awk '
 probe_host() { local d; d=$(vpn_dns); echo "${d:-${CAMPUS_DNS[0]}}"; }
 
 # -------------------------------------------------------------------------- mtu
-# The largest packet the tunnel carries depends on the network you connect from (router, ISP, hotspot),
-# so it's measured after each connect and remembered per network. VIA applies <via_mtu> from the profile
-# itself when the tunnel comes up, so a remembered value is written there before connecting: no sudo.
+# VIA (a userspace tun) silently drops *outgoing* packets a few bytes below the MTU it connected with:
+# with <via_mtu> 1250 the largest packet that gets out is 1246 (1240 -> 1230, 1220 -> 1214), apparently
+# from 16-byte cipher-block rounding. Full-size TCP segments then vanish: downloads work, but uploads and
+# large TLS hellos (post-quantum key shares) stall. A slow outer path can also cap it. So after connecting
+# we measure the limit and lower the interface MTU to it (sudo), and remember a per-network value to write
+# into <via_mtu> before the next connect, so VIA starts at a size it really carries (no sudo). Lowering
+# <via_mtu> also lowers the cap, so a remembered value that doesn't hold is dropped rather than lowered
+# further (no ratchet); 0 means "start at the default and fix with sudo each time".
 net_id() { # MAC of the default router: identifies the network you're on (empty if unknown)
   local gw dev
   read -r gw dev < <(ip -4 route show default 2>/dev/null |
@@ -337,8 +342,9 @@ save_mtu() { # save_mtu ID MTU [LABEL]
   mkdir -p "$CONFIG_DIR"; chmod 700 "$CONFIG_DIR"
   forget_mtu "$1"; printf '%s %s %s\n' "$1" "$2" "${3:-}" >>"$MTU_FILE"
 }
+default_mtu() { local m; m=$(saved_mtu gateway); echo "${m:-$MTU_DEFAULT}"; }
 want_mtu() { # the MTU to put in the profile for network ID
-  local m; m=$(saved_mtu "$1"); m=${m:-$(saved_mtu gateway)}; echo "${m:-$MTU_DEFAULT}"
+  local m; m=$(saved_mtu "$1"); [[ -n $m && $m != 0 ]] && echo "$m" || default_mtu
 }
 profile_mtu() { grep -oP '(?<=<via_mtu>)[0-9]+' "$PROFILE_XML" 2>/dev/null | head -1 || true; }
 set_profile_mtu() { # write N into the profile and reload it into VIA (needs a session and KEYPW)
@@ -346,7 +352,7 @@ set_profile_mtu() { # write N into the profile and reload it into VIA (needs a s
   sed -i "s|<via_mtu>[0-9]*</via_mtu>|<via_mtu>$1</via_mtu>|" "$PROFILE_XML"
   quiet via --keypassfile "$KEYFILE" profile side-load || { show_qlog; warn "could not reload the profile with MTU $1"; return 1; }
 }
-fits() { ping -c3 -i0.2 -W1 -M do -s $(( $1 - 28 )) "$2" >/dev/null 2>&1; }  # does a $1-byte packet get through?
+fits() { ping -c3 -i0.2 -W2 -M do -s $(( $1 - 28 )) "$2" >/dev/null 2>&1; }  # does a $1-byte packet get through?
 path_mtu() { # largest packet that crosses the tunnel, up to the current MTU; empty if it can't be measured
   local host cur lo=1000 hi mid
   host=$(probe_host); cur=$(tunnel_mtu)
@@ -359,25 +365,26 @@ path_mtu() { # largest packet that crosses the tunnel, up to the current MTU; em
   done
   echo "$lo"
 }
-safe_mtu() { echo $(( ($1 - 2) / 10 * 10 )); }   # a little under the measured limit, e.g. 1246 -> 1240
-
-check_mtu() { # after connect: measure, fix now if needed, remember for this network
-  local id=$1 cur max new label
-  cur=$(tunnel_mtu); label=$(net_label)
-  max=$(spin "checking the largest packet the tunnel carries" path_mtu)
-  if [[ -z $max ]]; then
-    [[ -n $(saved_mtu "$id") ]] && return 0
-    warn "couldn't measure the tunnel's packet size (ping blocked?) - using a safe $MTU_FALLBACK"
-    new=$MTU_FALLBACK
-  elif (( max >= cur )); then
-    ok "MTU $cur fits this network"; save_mtu "$id" "$cur" "$label"; return 0
-  else
-    new=$(safe_mtu "$max")
-    warn "MTU $cur is too big for this network: the largest packet that gets through is $max bytes"
+check_mtu() { # after connect: make sure full-size packets get out; fix this session, remember for the next
+  local id=$1 cur lim label saved
+  cur=$(tunnel_mtu); label=$(net_label); saved=$(saved_mtu "$id")
+  sleep 2   # let the tunnel settle
+  lim=$(spin "checking that full-size packets get through" path_mtu)
+  if [[ -z $lim ]]; then
+    warn "couldn't check the packet size (no ping replies from $(probe_host))."
+    hint "If uploads or some apps hang, try: exeter-vpn mtu $MTU_FALLBACK"; return 0
   fi
-  hint "Lowering it to $new and remembering that for ${label:-this network}, so later connects need no sudo."
-  if sudo ip link set dev "$IFACE" mtu "$new"; then save_mtu "$id" "$new" "$label"; ok "MTU set to $new"
-  else warn "MTU not changed - large transfers may stall. Fix with: exeter-vpn mtu $new"; fi
+  if (( lim >= cur )); then ok "full-size packets ($cur bytes) get through"; return 0; fi
+  warn "packets over $lim bytes are dropped (MTU is $cur): uploads and large requests would stall"
+  if sudo ip link set dev "$IFACE" mtu "$lim"; then ok "MTU set to $lim for this session"
+  else warn "MTU not changed. Fix with: sudo ip link set dev $IFACE mtu $lim"; fi
+  if [[ -z $saved ]]; then
+    save_mtu "$id" "$lim" "$label"
+    hint "Next connect from ${label:-this network} starts VIA at $lim, which should avoid this (and the sudo)."
+  elif [[ $saved != 0 ]]; then
+    save_mtu "$id" 0 "$label"
+    hint "Starting VIA at $saved didn't avoid it, so future connects use the default and fix it like this."
+  fi
 }
 
 cmd_status() {
@@ -464,7 +471,11 @@ cmd_mtu() {
   case ${1:-} in
     "")
       if tunnel_up; then say "  $IFACE MTU is ${B}$(tunnel_mtu)${N}"; else say "  not connected"; fi
-      say "  saved for ${label:-this network}: ${saved:-nothing yet (measured on the next connect)}"
+      case $saved in
+        "") say "  saved for ${label:-this network}: nothing yet (checked on the next connect)" ;;
+        0)  say "  saved for ${label:-this network}: start at the default ($(default_mtu)) and fix it after connecting" ;;
+        *)  say "  saved for ${label:-this network}: ${B}$saved${N} (VIA is started at this)" ;;
+      esac
       hint "exeter-vpn mtu probe | mtu <N> | mtu reset [--all]" ;;
     probe)
       tunnel_up || die "connect first."
@@ -472,14 +483,17 @@ cmd_mtu() {
       max=$(spin "probing" path_mtu)
       [[ -n $max ]] || die "no answer from $(probe_host) even for small packets: ping is blocked, or the tunnel is broken."
       if (( max >= cur )); then ok "MTU $cur fits: $cur-byte packets get through"
-      else ok "largest packet that gets through: $max bytes (current MTU $cur)"; hint "fix: exeter-vpn mtu $(safe_mtu "$max")"; fi ;;
+      else ok "largest packet that gets through: $max bytes (current MTU $cur)"; hint "fix: exeter-vpn mtu $max"; fi ;;
     reset)
       if [[ ${2:-} == --all ]]; then rm -f "$MTU_FILE"; ok "forgot the MTU for every network"
       else forget_mtu "$id"; ok "forgot the MTU for ${label:-this network}; it's measured again on the next connect"; fi ;;
     *[!0-9]*) die "usage: exeter-vpn mtu [probe | <number> | reset [--all]]" ;;
     *)
       (( $1 >= 576 && $1 <= 1500 )) || die "the MTU must be between 576 and 1500."
-      if tunnel_up; then sudo ip link set dev "$IFACE" mtu "$1" || die "could not set the MTU."; fi
+      if tunnel_up; then
+        sudo ip link set dev "$IFACE" mtu "$1" || die "could not set the MTU."
+        fits "$1" "$(probe_host)" || warn "$1-byte packets don't get through this session - run: exeter-vpn mtu probe"
+      fi
       save_mtu "$id" "$1" "$label"
       ok "MTU $1 saved for ${label:-this network}; it's applied on every connect from there" ;;
   esac
